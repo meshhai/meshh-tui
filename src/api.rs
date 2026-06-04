@@ -20,6 +20,7 @@ const CLIENT_NAME: &str = "meshh-tui";
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct DeviceAuthorizationRequest {
@@ -1322,9 +1323,12 @@ impl HttpTransport for ReqwestTransport {
         let status = response.status().as_u16();
 
         if !(200..300).contains(&status) {
-            let body = response.bytes().await.map_err(|source| {
-                TransportError::with_source("network error while reading response body", source)
-            })?;
+            let body = tokio::time::timeout(self.request_timeout, response.bytes())
+                .await
+                .map_err(|_source| TransportError::new("stream error response body timeout"))?
+                .map_err(|source| {
+                    TransportError::with_source("network error while reading response body", source)
+                })?;
 
             return Ok(HttpResponse::new(status, body.to_vec()));
         }
@@ -1482,6 +1486,16 @@ struct DeliveryStreamParser {
 impl DeliveryStreamParser {
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
         self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > MAX_SSE_EVENT_BYTES {
+            self.buffer.clear();
+            return Err(ApiError::InvalidResponse {
+                message: format!(
+                    "delivery stream event exceeded {} bytes",
+                    MAX_SSE_EVENT_BYTES
+                ),
+            });
+        }
+
         let mut frames = Vec::new();
 
         while let Some((index, separator_len)) = next_sse_message_separator(&self.buffer) {
@@ -2237,6 +2251,17 @@ mod tests {
             frames[1],
             DeliveryStreamFrame::Cursor(StreamCursor::new("cur_05").unwrap())
         );
+        assert!(parser.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_oversized_delivery_stream_event_buffers() {
+        let mut parser = super::DeliveryStreamParser::default();
+        let error = parser
+            .push_chunk(&vec![b'a'; super::MAX_SSE_EVENT_BYTES + 1])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("delivery stream event exceeded"));
         assert!(parser.finish().unwrap().is_empty());
     }
 

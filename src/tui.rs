@@ -419,9 +419,7 @@ impl AppState {
     }
 
     fn note_stream_cursor(&mut self, cursor: StreamCursor) {
-        if self.seen_stream_cursors.insert(cursor.clone()) {
-            self.stream_resume_cursor = Some(cursor);
-        }
+        self.stream_resume_cursor = Some(cursor);
     }
 
     fn insert_or_replace_stream_delivery(&mut self, item: DeliveryListItem) {
@@ -1152,6 +1150,30 @@ mod tests {
         assert!(rendered.contains("2 rows"));
         assert!(!rendered.contains("resume:"));
         assert!(!rendered.contains("cur_03"));
+    }
+
+    #[test]
+    fn cursor_frame_does_not_dedupe_following_delivery_with_same_cursor() {
+        let mut state = AppState::default();
+        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+
+        state.receive_stream_frames(vec![
+            DeliveryStreamFrame::Cursor(StreamCursor::new("cur_01").unwrap()),
+            DeliveryStreamFrame::Delivery {
+                cursor: Some(StreamCursor::new("cur_01").unwrap()),
+                item: delivery("del_pub_01", "Deploy complete", Some("GitHub")),
+            },
+        ]);
+
+        assert_eq!(state.deliveries().len(), 1);
+        assert_eq!(
+            state.deliveries()[0].public_delivery_id().as_str(),
+            "del_pub_01"
+        );
+        assert_eq!(
+            state.stream_resume_cursor().map(StreamCursor::as_str),
+            Some("cur_01")
+        );
     }
 
     #[test]
