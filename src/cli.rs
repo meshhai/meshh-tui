@@ -1,7 +1,14 @@
-use anyhow::{Result, bail};
+use std::io;
+
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use crate::config::RuntimeConfig;
+use crate::{
+    api::{ApiClient, ApiClientConfig},
+    config::RuntimeConfig,
+    credentials::FileCredentialStore,
+    login::{self, LoginError, LoginOptions, TokioLoginSleeper},
+};
 
 /// Command-line arguments for the Meshh terminal client.
 #[derive(Debug, Parser)]
@@ -30,11 +37,35 @@ pub enum Command {
 }
 
 /// Runs a parsed CLI command.
-pub fn run(cli: Cli) -> Result<()> {
-    let _config = RuntimeConfig::load(cli.api_base_url)?;
+pub async fn run(cli: Cli) -> Result<()> {
+    let config = RuntimeConfig::load(cli.api_base_url)?;
 
     match cli.command {
-        Command::Login => bail!("`meshh login` is not implemented yet"),
+        Command::Login => run_login_command(&config).await,
         Command::Tui => bail!("`meshh tui` is not implemented yet"),
+    }
+}
+
+async fn run_login_command(config: &RuntimeConfig) -> Result<()> {
+    let api = ApiClient::new(ApiClientConfig::from_runtime(config));
+    let credentials = FileCredentialStore::new_default()?;
+    let sleeper = TokioLoginSleeper;
+    let mut output = io::stdout();
+
+    tokio::select! {
+        result = login::run_device_login(
+            &api,
+            &credentials,
+            &sleeper,
+            &mut output,
+            LoginOptions::default(),
+        ) => {
+            result?;
+            Ok(())
+        }
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("could not listen for terminal interrupt")?;
+            Err(LoginError::Interrupted.into())
+        }
     }
 }

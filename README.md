@@ -23,7 +23,7 @@ The first release is planned around two commands:
 - `meshh login` authenticates the terminal with Meshh.
 - `meshh tui` opens the route delivery terminal UI.
 
-Both commands are present in the CLI foundation. Their API behavior is implemented in later slices.
+`meshh login` starts Meshh device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed. `meshh tui` is present in the CLI foundation and will be implemented in a later slice.
 
 ## Configuration
 

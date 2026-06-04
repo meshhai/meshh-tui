@@ -1,6 +1,7 @@
 use clap::Parser;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = meshh_tui::cli::Cli::parse();
-    meshh_tui::cli::run(cli)
+    meshh_tui::cli::run(cli).await
 }
