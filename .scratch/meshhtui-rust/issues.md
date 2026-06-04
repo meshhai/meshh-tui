@@ -1,7 +1,3 @@
-# Review notes
-
-- [ ] Honor device-flow `slow_down` responses by increasing the polling interval before retrying, with tests covering the response mapping and sleep cadence.
-
 # Meshh TUI Issues
 
 ## 1. Project Foundation

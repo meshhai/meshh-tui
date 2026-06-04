@@ -185,6 +185,7 @@ fn default_device_poll_interval_secs() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceTokenPoll {
     Pending,
+    SlowDown,
     Approved { token: BearerToken },
     Denied,
     Expired,
@@ -232,7 +233,8 @@ impl DeviceTokenResponse {
                             .to_owned(),
                     })
             }
-            "pending" | "authorization_pending" | "slow_down" => Ok(DeviceTokenPoll::Pending),
+            "pending" | "authorization_pending" => Ok(DeviceTokenPoll::Pending),
+            "slow_down" => Ok(DeviceTokenPoll::SlowDown),
             "denied" | "access_denied" => Ok(DeviceTokenPoll::Denied),
             "expired" | "expired_token" => Ok(DeviceTokenPoll::Expired),
             "invalid_device_code" | "invalid_grant" => Ok(DeviceTokenPoll::InvalidDeviceCode),
@@ -1171,6 +1173,7 @@ fn parse_device_token_poll_response(response: HttpResponse) -> Result<DeviceToke
     {
         match &poll {
             DeviceTokenPoll::Pending
+            | DeviceTokenPoll::SlowDown
             | DeviceTokenPoll::Denied
             | DeviceTokenPoll::Expired
             | DeviceTokenPoll::InvalidDeviceCode => return Ok(poll),
@@ -1585,6 +1588,10 @@ mod tests {
             DeviceTokenPoll::Pending
         );
         assert_eq!(
+            parse_poll_fixture(r#"{"error":"slow_down"}"#),
+            DeviceTokenPoll::SlowDown
+        );
+        assert_eq!(
             parse_poll_fixture(r#"{"status":"denied"}"#),
             DeviceTokenPoll::Denied
         );
@@ -1614,6 +1621,7 @@ mod tests {
                 r#"{"error":"authorization_pending"}"#,
                 DeviceTokenPoll::Pending,
             ),
+            (400, r#"{"error":"slow_down"}"#, DeviceTokenPoll::SlowDown),
             (403, r#"{"error":"access_denied"}"#, DeviceTokenPoll::Denied),
             (
                 400,

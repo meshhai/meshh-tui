@@ -5,6 +5,8 @@ use crate::{
     credentials::{CredentialError, CredentialStore},
 };
 
+const SLOW_DOWN_INTERVAL_INCREMENT: Duration = Duration::from_secs(5);
+
 /// Options that control device-login polling.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoginOptions {
@@ -116,6 +118,7 @@ where
     let max_poll_attempts = options
         .max_poll_attempts
         .unwrap_or_else(|| default_max_poll_attempts(&authorization));
+    let mut poll_interval = authorization.poll_interval();
 
     for attempt in 0..max_poll_attempts {
         match api
@@ -135,7 +138,14 @@ where
             }
             DeviceTokenPoll::Pending => {
                 if attempt + 1 < max_poll_attempts {
-                    sleeper.sleep(authorization.poll_interval()).await;
+                    sleeper.sleep(poll_interval).await;
+                }
+            }
+            DeviceTokenPoll::SlowDown => {
+                poll_interval = poll_interval.saturating_add(SLOW_DOWN_INTERVAL_INCREMENT);
+
+                if attempt + 1 < max_poll_attempts {
+                    sleeper.sleep(poll_interval).await;
                 }
             }
             DeviceTokenPoll::Denied => return Err(LoginError::Denied),
@@ -263,6 +273,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_down_device_login_increases_polling_interval_before_retrying() {
+        let api = ScriptedDeviceLoginApi::new(
+            authorization(),
+            [
+                DeviceTokenPoll::Pending,
+                DeviceTokenPoll::SlowDown,
+                DeviceTokenPoll::Pending,
+                DeviceTokenPoll::Approved {
+                    token: BearerToken::new("approved-after-slow-down").unwrap(),
+                },
+            ],
+        );
+        let credentials = MemoryCredentialStore::default();
+        let sleeper = RecordingSleeper::default();
+        let mut output = Vec::new();
+
+        run_device_login(
+            &api,
+            &credentials,
+            &sleeper,
+            &mut output,
+            LoginOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.poll_count(), 4);
+        assert_eq!(
+            sleeper.sleep_durations(),
+            vec![
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                Duration::from_secs(10)
+            ]
+        );
+        assert_eq!(
+            credentials.load_token().unwrap().unwrap().as_str(),
+            "approved-after-slow-down"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_device_login_times_out_after_poll_limit() {
         let api = ScriptedDeviceLoginApi::new(authorization(), [DeviceTokenPoll::Pending]);
         let credentials = MemoryCredentialStore::default();
@@ -363,6 +415,10 @@ mod tests {
     impl RecordingSleeper {
         fn sleep_count(&self) -> usize {
             self.sleeps.lock().unwrap().len()
+        }
+
+        fn sleep_durations(&self) -> Vec<Duration> {
+            self.sleeps.lock().unwrap().clone()
         }
     }
 
