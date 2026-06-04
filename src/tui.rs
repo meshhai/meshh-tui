@@ -479,16 +479,22 @@ where
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .map_err(|source| TuiError::Terminal { source })?;
     let mut state = AppState::default();
+    let (load_sender, load_events) = mpsc::channel();
+    let mut stream_events = None;
 
     draw_state(&mut terminal, &state)?;
-    load_deliveries(&mut state, api, token).await;
-    state.start_stream();
-    let stream_events = spawn_stream_worker(
-        api.clone(),
-        token.clone(),
-        state.stream_resume_cursor().cloned(),
-    );
-    run_event_loop(&mut terminal, &mut state, api, token, &stream_events).await
+    spawn_delivery_page_load(api.clone(), token.clone(), load_sender.clone());
+
+    run_event_loop(
+        &mut terminal,
+        &mut state,
+        api,
+        token,
+        &load_sender,
+        &load_events,
+        &mut stream_events,
+    )
+    .await
 }
 
 async fn run_event_loop<B, A>(
@@ -496,14 +502,18 @@ async fn run_event_loop<B, A>(
     state: &mut AppState,
     api: &A,
     token: &BearerToken,
-    stream_events: &mpsc::Receiver<StreamWorkerMessage>,
+    load_sender: &mpsc::Sender<LoadWorkerMessage>,
+    load_events: &mpsc::Receiver<LoadWorkerMessage>,
+    stream_events: &mut Option<mpsc::Receiver<StreamWorkerMessage>>,
 ) -> Result<(), TuiError>
 where
     B: Backend<Error = io::Error>,
-    A: DeliveryApi,
+    A: DeliveryApi + Clone + Send + Sync + 'static,
 {
     loop {
+        drain_load_events(state, load_events);
         drain_stream_events(state, stream_events);
+        ensure_stream_started(state, api, token, stream_events);
         draw_state(terminal, state)?;
 
         if !event::poll(EVENT_POLL_INTERVAL).map_err(|source| TuiError::Terminal { source })? {
@@ -522,20 +532,59 @@ where
             AppCommand::Quit => return Ok(()),
             AppCommand::LoadDeliveries => {
                 draw_state(terminal, state)?;
-                load_deliveries(state, api, token).await;
+                spawn_delivery_page_load(api.clone(), token.clone(), load_sender.clone());
             }
             AppCommand::LoadDetail(public_delivery_id) => {
                 draw_state(terminal, state)?;
-                load_detail(state, api, token, &public_delivery_id).await;
+                spawn_detail_load(
+                    api.clone(),
+                    token.clone(),
+                    public_delivery_id,
+                    load_sender.clone(),
+                );
             }
         }
     }
 }
 
 #[derive(Debug)]
+enum LoadWorkerMessage {
+    DeliveryPage(Result<DeliveryListPage, ApiError>),
+    Detail(Result<Box<DeliveryDetail>, ApiError>),
+}
+
+#[derive(Debug)]
 enum StreamWorkerMessage {
     Frames(Vec<DeliveryStreamFrame>),
     Error(ApiError),
+}
+
+fn spawn_delivery_page_load<A>(api: A, token: BearerToken, sender: mpsc::Sender<LoadWorkerMessage>)
+where
+    A: DeliveryApi + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        let _ = sender.send(LoadWorkerMessage::DeliveryPage(
+            api.list_deliveries(&token).await,
+        ));
+    });
+}
+
+fn spawn_detail_load<A>(
+    api: A,
+    token: BearerToken,
+    public_delivery_id: PublicDeliveryId,
+    sender: mpsc::Sender<LoadWorkerMessage>,
+) where
+    A: DeliveryApi + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        let _ = sender.send(LoadWorkerMessage::Detail(
+            api.get_delivery(&token, &public_delivery_id)
+                .await
+                .map(Box::new),
+        ));
+    });
 }
 
 fn spawn_stream_worker<A>(
@@ -558,7 +607,7 @@ where
             let stream_after = after.clone();
             let result = api
                 .stream_deliveries(&token, stream_after.as_ref(), |frame| {
-                    if let Some(cursor) = frame_cursor(&frame) {
+                    if let Some(cursor) = delivery_frame_cursor(&frame) {
                         next_after = Some(cursor);
                     }
                     received_frame = true;
@@ -604,7 +653,25 @@ where
     receiver
 }
 
-fn drain_stream_events(state: &mut AppState, stream_events: &mpsc::Receiver<StreamWorkerMessage>) {
+fn drain_load_events(state: &mut AppState, load_events: &mpsc::Receiver<LoadWorkerMessage>) {
+    while let Ok(message) = load_events.try_recv() {
+        match message {
+            LoadWorkerMessage::DeliveryPage(Ok(page)) => state.receive_delivery_page(page),
+            LoadWorkerMessage::DeliveryPage(Err(error)) => state.receive_list_error(&error),
+            LoadWorkerMessage::Detail(Ok(detail)) => state.receive_detail(*detail),
+            LoadWorkerMessage::Detail(Err(error)) => state.receive_detail_error(&error),
+        }
+    }
+}
+
+fn drain_stream_events(
+    state: &mut AppState,
+    stream_events: &Option<mpsc::Receiver<StreamWorkerMessage>>,
+) {
+    let Some(stream_events) = stream_events else {
+        return;
+    };
+
     while let Ok(message) = stream_events.try_recv() {
         match message {
             StreamWorkerMessage::Frames(frames) => state.receive_stream_frames(frames),
@@ -613,10 +680,27 @@ fn drain_stream_events(state: &mut AppState, stream_events: &mpsc::Receiver<Stre
     }
 }
 
-fn frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
+fn ensure_stream_started<A>(
+    state: &mut AppState,
+    api: &A,
+    token: &BearerToken,
+    stream_events: &mut Option<mpsc::Receiver<StreamWorkerMessage>>,
+) where
+    A: DeliveryApi + Clone + Send + Sync + 'static,
+{
+    if stream_events.is_none() && !matches!(state.feed_status(), FeedStatus::Loading) {
+        state.start_stream();
+        *stream_events = Some(spawn_stream_worker(
+            api.clone(),
+            token.clone(),
+            state.stream_resume_cursor().cloned(),
+        ));
+    }
+}
+
+fn delivery_frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
     match frame {
-        DeliveryStreamFrame::Connected => None,
-        DeliveryStreamFrame::Cursor(cursor) => Some(cursor.clone()),
+        DeliveryStreamFrame::Connected | DeliveryStreamFrame::Cursor(_) => None,
         DeliveryStreamFrame::Delivery { cursor, item } => {
             cursor.clone().or_else(|| item.cursor().cloned())
         }
@@ -631,32 +715,6 @@ where
         .draw(|frame| render(frame, state))
         .map(|_| ())
         .map_err(|source| TuiError::Terminal { source })
-}
-
-async fn load_deliveries<A>(state: &mut AppState, api: &A, token: &BearerToken)
-where
-    A: DeliveryApi,
-{
-    state.start_loading();
-
-    match api.list_deliveries(token).await {
-        Ok(page) => state.receive_delivery_page(page),
-        Err(error) => state.receive_list_error(&error),
-    }
-}
-
-async fn load_detail<A>(
-    state: &mut AppState,
-    api: &A,
-    token: &BearerToken,
-    public_delivery_id: &PublicDeliveryId,
-) where
-    A: DeliveryApi,
-{
-    match api.get_delivery(token, public_delivery_id).await {
-        Ok(detail) => state.receive_detail(detail),
-        Err(error) => state.receive_detail_error(&error),
-    }
 }
 
 struct TerminalModeGuard;
@@ -1266,6 +1324,43 @@ mod tests {
         assert_eq!(
             api.observed_after_values(),
             vec![Some("cur_01".to_owned()), Some("cur_02".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_worker_does_not_resume_after_standalone_cursor_frames() {
+        let api = ScriptedStreamApi::new(vec![
+            StreamResponse::Frames(vec![DeliveryStreamFrame::Cursor(
+                StreamCursor::new("cur_02").unwrap(),
+            )]),
+            StreamResponse::AuthError,
+        ]);
+        let receiver = super::spawn_stream_worker(
+            api.clone(),
+            BearerToken::new("destination-token").unwrap(),
+            Some(StreamCursor::new("cur_01").unwrap()),
+        );
+
+        match recv_stream_message(&receiver).await {
+            super::StreamWorkerMessage::Frames(frames) => assert_eq!(frames.len(), 1),
+            super::StreamWorkerMessage::Error(error) => {
+                panic!("expected stream cursor frame, got {error}")
+            }
+        }
+
+        match recv_stream_message(&receiver).await {
+            super::StreamWorkerMessage::Error(ApiError::Authentication { status: 401, .. }) => {}
+            super::StreamWorkerMessage::Error(error) => {
+                panic!("expected stream auth error, got {error}")
+            }
+            super::StreamWorkerMessage::Frames(frames) => {
+                panic!("expected stream auth error, got {frames:?}")
+            }
+        }
+
+        assert_eq!(
+            api.observed_after_values(),
+            vec![Some("cur_01".to_owned()), Some("cur_01".to_owned())]
         );
     }
 
