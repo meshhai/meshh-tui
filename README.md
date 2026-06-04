@@ -27,8 +27,29 @@ Both commands are present in the CLI foundation. Their API behavior is implement
 
 ## Configuration
 
-The API base URL can be passed per command with `--api-base-url` or through `MESHH_API_BASE_URL`.
-Full config-file loading and credential storage are implemented in later slices.
+The API base URL is resolved in this order:
+
+1. `--api-base-url`
+2. `MESHH_API_BASE_URL`
+3. The platform config file
+4. `https://api.meshh.ai`
+
+The config file is JSON and supports `api_base_url`:
+
+```json
+{
+  "api_base_url": "https://api.meshh.ai"
+}
+```
+
+Meshh stores local config under the platform config directory, such as
+`~/Library/Application Support/meshh/config.json` on macOS,
+`~/.config/meshh/config.json` on Linux, and `%APPDATA%\meshh\config.json`
+on Windows.
+
+Destination-scoped bearer tokens are isolated behind the `CredentialStore`
+trait. The current fallback store writes `credentials.json` under the same
+config directory with owner-only file permissions on Unix platforms.
 
 ## Development
 

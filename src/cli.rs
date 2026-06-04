@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use crate::config::{ENV_API_BASE_URL, RuntimeConfig};
+use crate::config::RuntimeConfig;
 
 /// Command-line arguments for the Meshh terminal client.
 #[derive(Debug, Parser)]
@@ -12,7 +12,7 @@ use crate::config::{ENV_API_BASE_URL, RuntimeConfig};
 )]
 pub struct Cli {
     /// Override the Meshh API base URL for this invocation.
-    #[arg(long, global = true, env = ENV_API_BASE_URL, value_name = "URL")]
+    #[arg(long, global = true, value_name = "URL")]
     pub api_base_url: Option<String>,
 
     #[command(subcommand)]
@@ -31,7 +31,7 @@ pub enum Command {
 
 /// Runs a parsed CLI command.
 pub fn run(cli: Cli) -> Result<()> {
-    let _config = RuntimeConfig::from_cli(cli.api_base_url);
+    let _config = RuntimeConfig::load(cli.api_base_url)?;
 
     match cli.command {
         Command::Login => bail!("`meshh login` is not implemented yet"),
