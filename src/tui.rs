@@ -133,8 +133,13 @@ pub enum KeyAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     None,
-    LoadDeliveries,
-    LoadDetail(PublicDeliveryId),
+    LoadDeliveries {
+        generation: u64,
+    },
+    LoadDetail {
+        public_delivery_id: PublicDeliveryId,
+        generation: u64,
+    },
     Quit,
 }
 
@@ -151,6 +156,8 @@ pub struct AppState {
     seen_stream_cursors: HashSet<StreamCursor>,
     detail_status: DetailStatus,
     detail: Option<DeliveryDetail>,
+    list_request_generation: u64,
+    detail_request_generation: u64,
 }
 
 impl Default for AppState {
@@ -166,6 +173,8 @@ impl Default for AppState {
             seen_stream_cursors: HashSet::new(),
             detail_status: DetailStatus::Hidden,
             detail: None,
+            list_request_generation: 0,
+            detail_request_generation: 0,
         }
     }
 }
@@ -228,10 +237,16 @@ impl AppState {
         self.feed_status = FeedStatus::Loading;
         self.detail_status = DetailStatus::Hidden;
         self.detail = None;
+        self.list_request_generation = self.list_request_generation.saturating_add(1);
+        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
     }
 
     /// Applies a successful delivery list response.
-    pub fn receive_delivery_page(&mut self, page: DeliveryListPage) {
+    pub fn receive_delivery_page(&mut self, generation: u64, page: DeliveryListPage) {
+        if generation != self.list_request_generation {
+            return;
+        }
+
         self.deliveries = page.items().to_vec();
         self.selected_index = if self.deliveries.is_empty() {
             None
@@ -248,7 +263,11 @@ impl AppState {
     }
 
     /// Applies a failed delivery list response without panicking or printing secrets.
-    pub fn receive_list_error(&mut self, error: &ApiError) {
+    pub fn receive_list_error(&mut self, generation: u64, error: &ApiError) {
+        if generation != self.list_request_generation {
+            return;
+        }
+
         self.feed_status = FeedStatus::Error(AppError::from_api_error(error));
         self.clamp_selection();
     }
@@ -327,13 +346,18 @@ impl AppState {
         };
         self.detail_status = DetailStatus::Loading;
         self.detail = None;
+        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
 
         Some(public_delivery_id)
     }
 
     /// Applies a successful detail response.
-    pub fn receive_detail(&mut self, detail: DeliveryDetail) {
+    pub fn receive_detail(&mut self, generation: u64, detail: DeliveryDetail) {
         let public_delivery_id = detail.public_delivery_id().clone();
+
+        if !self.detail_request_matches(generation, &public_delivery_id) {
+            return;
+        }
 
         self.screen = Screen::DeliveryDetail { public_delivery_id };
         self.detail_status = DetailStatus::Ready;
@@ -341,7 +365,11 @@ impl AppState {
     }
 
     /// Applies a failed detail response while keeping the detail screen visible.
-    pub fn receive_detail_error(&mut self, error: &ApiError) {
+    pub fn receive_detail_error(&mut self, generation: u64, error: &ApiError) {
+        if generation != self.detail_request_generation {
+            return;
+        }
+
         self.detail_status = DetailStatus::Error(AppError::from_api_error(error));
     }
 
@@ -350,6 +378,7 @@ impl AppState {
         self.screen = Screen::DeliveryList;
         self.detail_status = DetailStatus::Hidden;
         self.detail = None;
+        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
     }
 
     /// Applies a keyboard action and returns any side effect the caller must perform.
@@ -373,7 +402,10 @@ impl AppState {
             KeyAction::Open => {
                 if matches!(self.screen, Screen::DeliveryList) {
                     self.open_selected_detail()
-                        .map(AppCommand::LoadDetail)
+                        .map(|public_delivery_id| AppCommand::LoadDetail {
+                            public_delivery_id,
+                            generation: self.detail_request_generation,
+                        })
                         .unwrap_or(AppCommand::None)
                 } else {
                     AppCommand::None
@@ -389,13 +421,20 @@ impl AppState {
             KeyAction::Refresh => match self.screen() {
                 Screen::DeliveryList => {
                     self.start_loading();
-                    AppCommand::LoadDeliveries
+                    AppCommand::LoadDeliveries {
+                        generation: self.list_request_generation,
+                    }
                 }
                 Screen::DeliveryDetail { public_delivery_id } => {
                     let public_delivery_id = public_delivery_id.clone();
                     self.detail_status = DetailStatus::Loading;
                     self.detail = None;
-                    AppCommand::LoadDetail(public_delivery_id)
+                    self.detail_request_generation =
+                        self.detail_request_generation.saturating_add(1);
+                    AppCommand::LoadDetail {
+                        public_delivery_id,
+                        generation: self.detail_request_generation,
+                    }
                 }
             },
         }
@@ -426,6 +465,20 @@ impl AppState {
 
     fn note_stream_cursor(&mut self, cursor: StreamCursor) {
         self.stream_resume_cursor = Some(cursor);
+    }
+
+    fn detail_request_matches(
+        &self,
+        generation: u64,
+        public_delivery_id: &PublicDeliveryId,
+    ) -> bool {
+        generation == self.detail_request_generation
+            && matches!(
+                &self.screen,
+                Screen::DeliveryDetail {
+                    public_delivery_id: current_public_delivery_id
+                } if current_public_delivery_id == public_delivery_id
+            )
     }
 
     fn insert_or_replace_stream_delivery(&mut self, item: DeliveryListItem) {
@@ -483,7 +536,12 @@ where
     let mut stream_events = None;
 
     draw_state(&mut terminal, &state)?;
-    spawn_delivery_page_load(api.clone(), token.clone(), load_sender.clone());
+    spawn_delivery_page_load(
+        api.clone(),
+        token.clone(),
+        state.list_request_generation,
+        load_sender.clone(),
+    );
 
     run_event_loop(
         &mut terminal,
@@ -530,16 +588,25 @@ where
         match state.handle_key_action(action) {
             AppCommand::None => {}
             AppCommand::Quit => return Ok(()),
-            AppCommand::LoadDeliveries => {
+            AppCommand::LoadDeliveries { generation } => {
                 draw_state(terminal, state)?;
-                spawn_delivery_page_load(api.clone(), token.clone(), load_sender.clone());
+                spawn_delivery_page_load(
+                    api.clone(),
+                    token.clone(),
+                    generation,
+                    load_sender.clone(),
+                );
             }
-            AppCommand::LoadDetail(public_delivery_id) => {
+            AppCommand::LoadDetail {
+                public_delivery_id,
+                generation,
+            } => {
                 draw_state(terminal, state)?;
                 spawn_detail_load(
                     api.clone(),
                     token.clone(),
                     public_delivery_id,
+                    generation,
                     load_sender.clone(),
                 );
             }
@@ -549,8 +616,15 @@ where
 
 #[derive(Debug)]
 enum LoadWorkerMessage {
-    DeliveryPage(Result<DeliveryListPage, ApiError>),
-    Detail(Result<Box<DeliveryDetail>, ApiError>),
+    DeliveryPage {
+        generation: u64,
+        result: Result<DeliveryListPage, ApiError>,
+    },
+    Detail {
+        public_delivery_id: PublicDeliveryId,
+        generation: u64,
+        result: Result<Box<DeliveryDetail>, ApiError>,
+    },
 }
 
 #[derive(Debug)]
@@ -559,14 +633,19 @@ enum StreamWorkerMessage {
     Error(ApiError),
 }
 
-fn spawn_delivery_page_load<A>(api: A, token: BearerToken, sender: mpsc::Sender<LoadWorkerMessage>)
-where
+fn spawn_delivery_page_load<A>(
+    api: A,
+    token: BearerToken,
+    generation: u64,
+    sender: mpsc::Sender<LoadWorkerMessage>,
+) where
     A: DeliveryApi + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let _ = sender.send(LoadWorkerMessage::DeliveryPage(
-            api.list_deliveries(&token).await,
-        ));
+        let _ = sender.send(LoadWorkerMessage::DeliveryPage {
+            generation,
+            result: api.list_deliveries(&token).await,
+        });
     });
 }
 
@@ -574,16 +653,22 @@ fn spawn_detail_load<A>(
     api: A,
     token: BearerToken,
     public_delivery_id: PublicDeliveryId,
+    generation: u64,
     sender: mpsc::Sender<LoadWorkerMessage>,
 ) where
     A: DeliveryApi + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let _ = sender.send(LoadWorkerMessage::Detail(
-            api.get_delivery(&token, &public_delivery_id)
-                .await
-                .map(Box::new),
-        ));
+        let result = api
+            .get_delivery(&token, &public_delivery_id)
+            .await
+            .map(Box::new);
+
+        let _ = sender.send(LoadWorkerMessage::Detail {
+            public_delivery_id,
+            generation,
+            result,
+        });
     });
 }
 
@@ -656,10 +741,32 @@ where
 fn drain_load_events(state: &mut AppState, load_events: &mpsc::Receiver<LoadWorkerMessage>) {
     while let Ok(message) = load_events.try_recv() {
         match message {
-            LoadWorkerMessage::DeliveryPage(Ok(page)) => state.receive_delivery_page(page),
-            LoadWorkerMessage::DeliveryPage(Err(error)) => state.receive_list_error(&error),
-            LoadWorkerMessage::Detail(Ok(detail)) => state.receive_detail(*detail),
-            LoadWorkerMessage::Detail(Err(error)) => state.receive_detail_error(&error),
+            LoadWorkerMessage::DeliveryPage {
+                generation,
+                result: Ok(page),
+            } => state.receive_delivery_page(generation, page),
+            LoadWorkerMessage::DeliveryPage {
+                generation,
+                result: Err(error),
+            } => state.receive_list_error(generation, &error),
+            LoadWorkerMessage::Detail {
+                public_delivery_id,
+                generation,
+                result: Ok(detail),
+            } => {
+                if state.detail_request_matches(generation, &public_delivery_id) {
+                    state.receive_detail(generation, *detail);
+                }
+            }
+            LoadWorkerMessage::Detail {
+                public_delivery_id,
+                generation,
+                result: Err(error),
+            } => {
+                if state.detail_request_matches(generation, &public_delivery_id) {
+                    state.receive_detail_error(generation, &error);
+                }
+            }
         }
     }
 }
@@ -700,7 +807,8 @@ fn ensure_stream_started<A>(
 
 fn delivery_frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
     match frame {
-        DeliveryStreamFrame::Connected | DeliveryStreamFrame::Cursor(_) => None,
+        DeliveryStreamFrame::Connected => None,
+        DeliveryStreamFrame::Cursor(cursor) => Some(cursor.clone()),
         DeliveryStreamFrame::Delivery { cursor, item } => {
             cursor.clone().or_else(|| item.cursor().cloned())
         }
@@ -1071,13 +1179,16 @@ mod tests {
         state.start_loading();
         assert_eq!(state.feed_status(), &FeedStatus::Loading);
 
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![
-                delivery("del_pub_01", "CPU alert routed to ops", Some("Datadog")),
-                delivery("del_pub_02", "Deploy complete", None),
-            ],
-            Some(StreamCursor::new("cur_next").unwrap()),
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![
+                    delivery("del_pub_01", "CPU alert routed to ops", Some("Datadog")),
+                    delivery("del_pub_02", "Deploy complete", None),
+                ],
+                Some(StreamCursor::new("cur_next").unwrap()),
+            ),
+        );
 
         assert_eq!(state.feed_status(), &FeedStatus::Ready);
         assert_eq!(state.deliveries().len(), 2);
@@ -1093,13 +1204,16 @@ mod tests {
     #[test]
     fn keyboard_navigation_opens_loads_and_closes_detail() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![
-                delivery("del_pub_01", "CPU alert routed to ops", Some("Datadog")),
-                delivery("del_pub_02", "Deploy complete", Some("GitHub")),
-            ],
-            None,
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![
+                    delivery("del_pub_01", "CPU alert routed to ops", Some("Datadog")),
+                    delivery("del_pub_02", "Deploy complete", Some("GitHub")),
+                ],
+                None,
+            ),
+        );
 
         state.handle_key_action(KeyAction::Down);
         assert_eq!(state.selected_index(), Some(1));
@@ -1107,7 +1221,10 @@ mod tests {
         let command = state.handle_key_action(KeyAction::Open);
         assert_eq!(
             command,
-            AppCommand::LoadDetail(PublicDeliveryId::new("del_pub_02").unwrap())
+            AppCommand::LoadDetail {
+                public_delivery_id: PublicDeliveryId::new("del_pub_02").unwrap(),
+                generation: state.detail_request_generation
+            }
         );
         assert_eq!(state.detail_status(), &DetailStatus::Loading);
         assert!(matches!(
@@ -1116,7 +1233,7 @@ mod tests {
                 if public_delivery_id.as_str() == "del_pub_02"
         ));
 
-        state.receive_detail(detail("del_pub_02", "Deploy complete"));
+        apply_detail(&mut state, detail("del_pub_02", "Deploy complete"));
 
         assert_eq!(state.detail_status(), &DetailStatus::Ready);
         assert_eq!(state.detail().unwrap().headline(), "Deploy complete");
@@ -1138,31 +1255,125 @@ mod tests {
     #[test]
     fn keyboard_refresh_and_quit_commands_are_explicit() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![delivery("del_pub_01", "CPU alert routed to ops", None)],
-            None,
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![delivery("del_pub_01", "CPU alert routed to ops", None)],
+                None,
+            ),
+        );
 
         assert_eq!(
             state.handle_key_action(KeyAction::Refresh),
-            AppCommand::LoadDeliveries
+            AppCommand::LoadDeliveries {
+                generation: state.list_request_generation
+            }
         );
         assert_eq!(state.feed_status(), &FeedStatus::Loading);
         assert_eq!(state.handle_key_action(KeyAction::Quit), AppCommand::Quit);
     }
 
     #[test]
+    fn stale_list_load_results_do_not_replace_newer_state() {
+        let mut state = AppState::default();
+        state.start_loading();
+        let stale_generation = state.list_request_generation;
+        state.start_loading();
+        let active_generation = state.list_request_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        sender
+            .send(super::LoadWorkerMessage::DeliveryPage {
+                generation: stale_generation,
+                result: Ok(DeliveryListPage::new(
+                    vec![delivery("del_pub_old", "Old result", None)],
+                    None,
+                )),
+            })
+            .unwrap();
+        super::drain_load_events(&mut state, &receiver);
+
+        assert_eq!(state.feed_status(), &FeedStatus::Loading);
+        assert!(state.deliveries().is_empty());
+
+        sender
+            .send(super::LoadWorkerMessage::DeliveryPage {
+                generation: active_generation,
+                result: Ok(DeliveryListPage::new(
+                    vec![delivery("del_pub_new", "New result", None)],
+                    None,
+                )),
+            })
+            .unwrap();
+        super::drain_load_events(&mut state, &receiver);
+
+        assert_eq!(state.feed_status(), &FeedStatus::Ready);
+        assert_eq!(state.deliveries()[0].headline(), "New result");
+    }
+
+    #[test]
+    fn stale_detail_load_results_do_not_reopen_closed_or_replaced_detail() {
+        let mut state = AppState::default();
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![
+                    delivery("del_pub_01", "First row", None),
+                    delivery("del_pub_02", "Second row", None),
+                ],
+                None,
+            ),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let first_public_delivery_id = state.open_selected_detail().unwrap();
+        let first_generation = state.detail_request_generation;
+        state.close_detail();
+
+        sender
+            .send(super::LoadWorkerMessage::Detail {
+                public_delivery_id: first_public_delivery_id,
+                generation: first_generation,
+                result: Ok(Box::new(detail("del_pub_01", "First row"))),
+            })
+            .unwrap();
+        super::drain_load_events(&mut state, &receiver);
+
+        assert_eq!(state.screen(), &Screen::DeliveryList);
+        assert_eq!(state.detail_status(), &DetailStatus::Hidden);
+        assert!(state.detail().is_none());
+
+        state.select_next();
+        let second_public_delivery_id = state.open_selected_detail().unwrap();
+        let second_generation = state.detail_request_generation;
+        sender
+            .send(super::LoadWorkerMessage::Detail {
+                public_delivery_id: second_public_delivery_id,
+                generation: second_generation,
+                result: Ok(Box::new(detail("del_pub_02", "Second row"))),
+            })
+            .unwrap();
+        super::drain_load_events(&mut state, &receiver);
+
+        assert_eq!(state.detail_status(), &DetailStatus::Ready);
+        assert_eq!(state.detail().unwrap().headline(), "Second row");
+    }
+
+    #[test]
     fn stream_frames_insert_rows_deduplicate_replays_track_resume_and_show_auth_errors() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![delivery_with_cursor(
-                "del_pub_01",
-                "CPU alert routed to ops",
-                Some("Datadog"),
-                Some("cur_01"),
-            )],
-            Some(StreamCursor::new("cur_history").unwrap()),
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![delivery_with_cursor(
+                    "del_pub_01",
+                    "CPU alert routed to ops",
+                    Some("Datadog"),
+                    Some("cur_01"),
+                )],
+                Some(StreamCursor::new("cur_history").unwrap()),
+            ),
+        );
 
         assert_eq!(
             state.stream_resume_cursor().map(StreamCursor::as_str),
@@ -1219,7 +1430,7 @@ mod tests {
     #[test]
     fn cursor_frame_does_not_dedupe_following_delivery_with_same_cursor() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+        apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
 
         state.receive_stream_frames(vec![
             DeliveryStreamFrame::Cursor(StreamCursor::new("cur_01").unwrap()),
@@ -1243,7 +1454,7 @@ mod tests {
     #[test]
     fn connected_stream_frame_marks_empty_feed_live() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+        apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
         state.start_stream();
 
         state.receive_stream_frames(vec![DeliveryStreamFrame::Connected]);
@@ -1256,9 +1467,12 @@ mod tests {
     #[test]
     fn stream_metadata_frames_do_not_hide_feed_load_errors() {
         let mut state = AppState::default();
-        state.receive_list_error(&ApiError::Transport {
-            source: TransportError::new("connection refused"),
-        });
+        apply_list_error(
+            &mut state,
+            &ApiError::Transport {
+                source: TransportError::new("connection refused"),
+            },
+        );
         state.start_stream();
 
         state.receive_stream_frames(vec![
@@ -1277,7 +1491,7 @@ mod tests {
     #[test]
     fn empty_feed_surfaces_stream_errors() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+        apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
 
         state.receive_stream_error(&ApiError::Transport {
             source: TransportError::new("connection refused"),
@@ -1328,7 +1542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_worker_does_not_resume_after_standalone_cursor_frames() {
+    async fn stream_worker_resumes_after_standalone_cursor_frames() {
         let api = ScriptedStreamApi::new(vec![
             StreamResponse::Frames(vec![DeliveryStreamFrame::Cursor(
                 StreamCursor::new("cur_02").unwrap(),
@@ -1360,7 +1574,7 @@ mod tests {
 
         assert_eq!(
             api.observed_after_values(),
-            vec![Some("cur_01".to_owned()), Some("cur_01".to_owned())]
+            vec![Some("cur_01".to_owned()), Some("cur_02".to_owned())]
         );
     }
 
@@ -1368,15 +1582,18 @@ mod tests {
     fn empty_auth_and_network_states_are_visible_without_terminal_io() {
         let mut state = AppState::default();
 
-        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+        apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
         assert_eq!(state.feed_status(), &FeedStatus::Empty);
         assert_eq!(state.selected_index(), None);
 
-        state.receive_list_error(&ApiError::Authentication {
-            operation: "listing deliveries",
-            status: 401,
-            body: "token_expired".to_owned(),
-        });
+        apply_list_error(
+            &mut state,
+            &ApiError::Authentication {
+                operation: "listing deliveries",
+                status: 401,
+                body: "token_expired".to_owned(),
+            },
+        );
 
         let FeedStatus::Error(error) = state.feed_status() else {
             panic!("expected auth list error");
@@ -1384,14 +1601,20 @@ mod tests {
         assert_eq!(error.kind(), AppErrorKind::Authentication);
         assert!(error.message().contains("stored token"));
 
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![delivery("del_pub_01", "CPU alert routed to ops", None)],
-            None,
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![delivery("del_pub_01", "CPU alert routed to ops", None)],
+                None,
+            ),
+        );
         state.open_selected_detail().unwrap();
-        state.receive_detail_error(&ApiError::Transport {
-            source: TransportError::new("connection refused"),
-        });
+        apply_detail_error(
+            &mut state,
+            &ApiError::Transport {
+                source: TransportError::new("connection refused"),
+            },
+        );
 
         let DetailStatus::Error(error) = state.detail_status() else {
             panic!("expected network detail error");
@@ -1403,14 +1626,17 @@ mod tests {
     #[test]
     fn render_outputs_list_columns_and_detail_fields() {
         let mut state = AppState::default();
-        state.receive_delivery_page(DeliveryListPage::new(
-            vec![delivery(
-                "del_pub_01",
-                "CPU alert routed to ops",
-                Some("Datadog"),
-            )],
-            Some(StreamCursor::new("cur_next").unwrap()),
-        ));
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![delivery(
+                    "del_pub_01",
+                    "CPU alert routed to ops",
+                    Some("Datadog"),
+                )],
+                Some(StreamCursor::new("cur_next").unwrap()),
+            ),
+        );
 
         let list_text = render_text(&state);
         assert!(list_text.contains("meshh-tui v0.1.0 | offline | 1 row | row 1/1"));
@@ -1423,7 +1649,7 @@ mod tests {
         assert!(list_text.contains("Jun 04 19:09"));
 
         state.open_selected_detail().unwrap();
-        state.receive_detail(detail("del_pub_01", "CPU alert routed to ops"));
+        apply_detail(&mut state, detail("del_pub_01", "CPU alert routed to ops"));
 
         let detail_text = render_text(&state);
         assert!(detail_text.contains("CPU alert routed to ops"));
@@ -1451,7 +1677,7 @@ mod tests {
                 delivery(&public_delivery_id, &headline, None)
             })
             .collect();
-        state.receive_delivery_page(DeliveryListPage::new(deliveries, None));
+        apply_page(&mut state, DeliveryListPage::new(deliveries, None));
 
         for _ in 0..18 {
             state.select_next();
@@ -1503,6 +1729,22 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn apply_page(state: &mut AppState, page: DeliveryListPage) {
+        state.receive_delivery_page(state.list_request_generation, page);
+    }
+
+    fn apply_list_error(state: &mut AppState, error: &ApiError) {
+        state.receive_list_error(state.list_request_generation, error);
+    }
+
+    fn apply_detail(state: &mut AppState, detail: DeliveryDetail) {
+        state.receive_detail(state.detail_request_generation, detail);
+    }
+
+    fn apply_detail_error(state: &mut AppState, error: &ApiError) {
+        state.receive_detail_error(state.detail_request_generation, error);
     }
 
     fn render_text(state: &AppState) -> String {
