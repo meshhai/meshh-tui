@@ -748,25 +748,23 @@ fn header_activity(state: &AppState) -> String {
     match state.feed_status() {
         FeedStatus::Loading => "loading".to_owned(),
         FeedStatus::Error(error) => error.heading().to_owned(),
-        FeedStatus::Empty => "empty".to_owned(),
-        FeedStatus::Ready => match state.stream_status() {
-            StreamStatus::Disconnected => "offline".to_owned(),
-            StreamStatus::Connecting => "connecting".to_owned(),
-            StreamStatus::Live => "live".to_owned(),
-            StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
-            StreamStatus::Error(error) => error.heading().to_owned(),
-        },
+        FeedStatus::Empty | FeedStatus::Ready => stream_activity(state.stream_status()),
+    }
+}
+
+fn stream_activity(stream_status: &StreamStatus) -> String {
+    match stream_status {
+        StreamStatus::Disconnected => "offline".to_owned(),
+        StreamStatus::Connecting => "connecting".to_owned(),
+        StreamStatus::Live => "live".to_owned(),
+        StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
+        StreamStatus::Error(error) => error.heading().to_owned(),
     }
 }
 
 fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
     if state.deliveries().is_empty() {
-        let message = match state.feed_status() {
-            FeedStatus::Loading => "Loading route deliveries...",
-            FeedStatus::Empty => "No route deliveries yet.",
-            FeedStatus::Error(error) => error.message(),
-            FeedStatus::Ready => "No route deliveries yet.",
-        };
+        let message = empty_list_message(state);
 
         frame.render_widget(
             Paragraph::new(message)
@@ -822,6 +820,17 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
     let mut table_state = TableState::default().with_selected(state.selected_index());
 
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn empty_list_message(state: &AppState) -> &str {
+    match state.feed_status() {
+        FeedStatus::Loading => "Loading route deliveries...",
+        FeedStatus::Error(error) => error.message(),
+        FeedStatus::Empty | FeedStatus::Ready => match state.stream_status() {
+            StreamStatus::Reconnecting(error) | StreamStatus::Error(error) => error.message(),
+            _other => "No route deliveries yet.",
+        },
+    }
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -1156,6 +1165,21 @@ mod tests {
         assert_eq!(state.feed_status(), &FeedStatus::Empty);
         assert_eq!(state.stream_status(), &StreamStatus::Live);
         assert!(state.deliveries().is_empty());
+    }
+
+    #[test]
+    fn empty_feed_surfaces_stream_errors() {
+        let mut state = AppState::default();
+        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+
+        state.receive_stream_error(&ApiError::Transport {
+            source: TransportError::new("connection refused"),
+        });
+
+        let rendered = render_text(&state);
+
+        assert!(rendered.contains("meshh-tui v0.1.0 | reconnecting: Network error"));
+        assert!(rendered.contains("network error"));
     }
 
     #[tokio::test]
