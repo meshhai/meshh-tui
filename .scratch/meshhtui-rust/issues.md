@@ -109,7 +109,7 @@ Connect the TUI to the stream endpoint so new deliveries appear while the app is
 
 ## 7. Open-Source Release Hardening
 
-Status: ready-for-agent  
+Status: in-progress  
 Type: AFK  
 Blocked by: Issues 4-6
 
@@ -120,7 +120,7 @@ Prepare the repo for a first alpha release.
 ### Acceptance criteria
 
 - [ ] README includes screenshots or an asciinema-style terminal example.
-- [ ] License, contribution notes, and security/reporting guidance are present.
+- [x] License, contribution notes, and security/reporting guidance are present.
 - [ ] CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - [ ] Release build works locally.
 - [ ] No secrets, internal Meshh IDs, or local-only paths are committed.

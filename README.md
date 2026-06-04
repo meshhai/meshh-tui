@@ -65,3 +65,9 @@ cargo doc --workspace --no-deps
 ```
 
 The crate is split into modules for CLI parsing, configuration, API client setup, credential storage, and TUI app state so each slice can be tested without terminal IO where possible.
+
+## Project Docs
+
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- License: MIT OR Apache-2.0; see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
