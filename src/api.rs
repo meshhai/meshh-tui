@@ -19,6 +19,7 @@ const DELIVERY_STREAM_PATH: &str = "/api/v1/destination/stream";
 const CLIENT_NAME: &str = "meshh-tui";
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Serialize)]
 struct DeviceAuthorizationRequest {
@@ -1237,6 +1238,7 @@ impl HttpResponse {
 pub struct ReqwestTransport {
     client: reqwest::Client,
     request_timeout: Duration,
+    stream_idle_timeout: Duration,
 }
 
 impl ReqwestTransport {
@@ -1245,6 +1247,7 @@ impl ReqwestTransport {
         Self {
             client: reqwest::Client::new(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
         }
     }
 }
@@ -1326,9 +1329,13 @@ impl HttpTransport for ReqwestTransport {
 
         on_chunk(&[])?;
 
-        while let Some(chunk) = response.chunk().await.map_err(|source| {
-            TransportError::with_source("network error while reading response body", source)
-        })? {
+        while let Some(chunk) = tokio::time::timeout(self.stream_idle_timeout, response.chunk())
+            .await
+            .map_err(|_source| TransportError::new("delivery stream idle timeout"))?
+            .map_err(|source| {
+                TransportError::with_source("network error while reading response body", source)
+            })?
+        {
             if !chunk.is_empty() {
                 on_chunk(&chunk)?;
             }
@@ -2034,6 +2041,8 @@ mod tests {
 
         assert_eq!(transport.request_timeout, Duration::from_secs(30));
         assert!(!transport.request_timeout.is_zero());
+        assert_eq!(transport.stream_idle_timeout, Duration::from_secs(90));
+        assert!(!transport.stream_idle_timeout.is_zero());
     }
 
     #[tokio::test]

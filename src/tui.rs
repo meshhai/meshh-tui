@@ -905,7 +905,7 @@ fn compact_iso_timestamp(timestamp: &str) -> Option<String> {
     let parts = timestamp
         .split_once('T')
         .or_else(|| timestamp.split_once(' '))?;
-    if parts.0.len() != 10 || parts.1.len() < 5 {
+    if parts.0.len() != 10 || parts.1.len() < 5 || !parts.0.is_ascii() || !parts.1.is_ascii() {
         return None;
     }
 
@@ -1263,6 +1263,13 @@ mod tests {
         assert!(detail_text.contains("https://alerts.example/del_pub_01"));
         assert!(detail_text.contains("Ops Escalation"));
         assert!(detail_text.contains("Published: Jun 04 19:09"));
+    }
+
+    #[test]
+    fn timestamp_formatting_falls_back_for_non_ascii_malformed_input() {
+        let timestamp = "2026é6-04T19:09:00Z";
+
+        assert_eq!(super::format_feed_timestamp(Some(timestamp)), timestamp);
     }
 
     #[test]
