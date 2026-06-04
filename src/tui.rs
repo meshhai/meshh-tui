@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, io, time::Duration};
+use std::{collections::HashSet, error::Error, fmt, io, sync::mpsc, time::Duration};
 
 use crossterm::{
     cursor::Show,
@@ -18,13 +18,14 @@ use ratatui::{
 use crate::{
     api::{
         ApiClient, ApiClientConfig, ApiError, DeliveryApi, DeliveryDetail, DeliveryListItem,
-        DeliveryListPage, PublicDeliveryId, StreamCursor,
+        DeliveryListPage, DeliveryStreamFrame, PublicDeliveryId, StreamCursor,
     },
     config::RuntimeConfig,
     credentials::{BearerToken, CredentialError, CredentialStore, FileCredentialStore},
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STREAM_RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// High-level screen currently shown by the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,16 @@ pub enum DetailStatus {
     Hidden,
     Loading,
     Ready,
+    Error(AppError),
+}
+
+/// Live delivery stream state visible to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamStatus {
+    Disconnected,
+    Connecting,
+    Live,
+    Reconnecting(AppError),
     Error(AppError),
 }
 
@@ -132,9 +143,12 @@ pub enum AppCommand {
 pub struct AppState {
     screen: Screen,
     feed_status: FeedStatus,
+    stream_status: StreamStatus,
     deliveries: Vec<DeliveryListItem>,
     selected_index: Option<usize>,
     next_cursor: Option<StreamCursor>,
+    stream_resume_cursor: Option<StreamCursor>,
+    seen_stream_cursors: HashSet<StreamCursor>,
     detail_status: DetailStatus,
     detail: Option<DeliveryDetail>,
 }
@@ -144,9 +158,12 @@ impl Default for AppState {
         Self {
             screen: Screen::DeliveryList,
             feed_status: FeedStatus::Loading,
+            stream_status: StreamStatus::Disconnected,
             deliveries: Vec::new(),
             selected_index: None,
             next_cursor: None,
+            stream_resume_cursor: None,
+            seen_stream_cursors: HashSet::new(),
             detail_status: DetailStatus::Hidden,
             detail: None,
         }
@@ -162,6 +179,11 @@ impl AppState {
     /// Returns the current list feed status.
     pub fn feed_status(&self) -> &FeedStatus {
         &self.feed_status
+    }
+
+    /// Returns the live delivery stream status.
+    pub fn stream_status(&self) -> &StreamStatus {
+        &self.stream_status
     }
 
     /// Returns the visible detail status.
@@ -190,6 +212,11 @@ impl AppState {
         self.next_cursor.as_ref()
     }
 
+    /// Returns the cursor that should be sent as the next stream `after` value.
+    pub fn stream_resume_cursor(&self) -> Option<&StreamCursor> {
+        self.stream_resume_cursor.as_ref()
+    }
+
     /// Returns the loaded detail record.
     pub fn detail(&self) -> Option<&DeliveryDetail> {
         self.detail.as_ref()
@@ -212,6 +239,7 @@ impl AppState {
             Some(0)
         };
         self.next_cursor = page.next_cursor().cloned();
+        self.track_page_cursors();
         self.feed_status = if self.deliveries.is_empty() {
             FeedStatus::Empty
         } else {
@@ -223,6 +251,50 @@ impl AppState {
     pub fn receive_list_error(&mut self, error: &ApiError) {
         self.feed_status = FeedStatus::Error(AppError::from_api_error(error));
         self.clamp_selection();
+    }
+
+    /// Moves the stream into a connecting state.
+    pub fn start_stream(&mut self) {
+        self.stream_status = StreamStatus::Connecting;
+    }
+
+    /// Applies stream frames, prepending new deliveries and suppressing cursor replays.
+    pub fn receive_stream_frames(&mut self, frames: Vec<DeliveryStreamFrame>) {
+        for frame in frames {
+            match frame {
+                DeliveryStreamFrame::Cursor(cursor) => self.note_stream_cursor(cursor),
+                DeliveryStreamFrame::Delivery { cursor, item } => {
+                    let cursor = cursor.or_else(|| item.cursor().cloned());
+                    if let Some(cursor) = cursor {
+                        if !self.seen_stream_cursors.insert(cursor.clone()) {
+                            continue;
+                        }
+
+                        self.stream_resume_cursor = Some(cursor);
+                    }
+
+                    self.insert_or_replace_stream_delivery(item);
+                }
+            }
+        }
+
+        self.feed_status = if self.deliveries.is_empty() {
+            FeedStatus::Empty
+        } else {
+            FeedStatus::Ready
+        };
+        self.stream_status = StreamStatus::Live;
+    }
+
+    /// Applies a stream error while keeping the loaded list visible.
+    pub fn receive_stream_error(&mut self, error: &ApiError) {
+        let app_error = AppError::from_api_error(error);
+
+        self.stream_status = if app_error.kind() == AppErrorKind::Authentication {
+            StreamStatus::Error(app_error)
+        } else {
+            StreamStatus::Reconnecting(app_error)
+        };
     }
 
     /// Moves selection one row up.
@@ -329,6 +401,46 @@ impl AppState {
             (index, _) => index,
         };
     }
+
+    fn track_page_cursors(&mut self) {
+        let latest_page_cursor = self
+            .deliveries
+            .iter()
+            .find_map(|item| item.cursor().cloned());
+
+        for cursor in self.deliveries.iter().filter_map(DeliveryListItem::cursor) {
+            self.seen_stream_cursors.insert(cursor.clone());
+        }
+
+        if self.stream_resume_cursor.is_none() {
+            self.stream_resume_cursor = latest_page_cursor;
+        }
+    }
+
+    fn note_stream_cursor(&mut self, cursor: StreamCursor) {
+        if self.seen_stream_cursors.insert(cursor.clone()) {
+            self.stream_resume_cursor = Some(cursor);
+        }
+    }
+
+    fn insert_or_replace_stream_delivery(&mut self, item: DeliveryListItem) {
+        let selected_id = self
+            .selected_delivery()
+            .map(|delivery| delivery.public_delivery_id().clone());
+        let incoming_id = item.public_delivery_id().clone();
+
+        self.deliveries
+            .retain(|delivery| delivery.public_delivery_id() != &incoming_id);
+        self.deliveries.insert(0, item);
+
+        self.selected_index = selected_id
+            .and_then(|selected_id| {
+                self.deliveries
+                    .iter()
+                    .position(|delivery| delivery.public_delivery_id() == &selected_id)
+            })
+            .or(Some(0));
+    }
 }
 
 /// Runs `meshh tui` using the default API client and credential store.
@@ -343,7 +455,7 @@ pub async fn run(config: &RuntimeConfig) -> Result<(), TuiError> {
 /// Runs the delivery TUI with injectable dependencies.
 pub async fn run_with_dependencies<A, C>(api: &A, credentials: &C) -> Result<(), TuiError>
 where
-    A: DeliveryApi,
+    A: DeliveryApi + Clone + Send + Sync + 'static,
     C: CredentialStore,
 {
     let token = credentials
@@ -356,7 +468,7 @@ where
 
 async fn run_authenticated<A>(api: &A, token: &BearerToken) -> Result<(), TuiError>
 where
-    A: DeliveryApi,
+    A: DeliveryApi + Clone + Send + Sync + 'static,
 {
     let _guard = TerminalModeGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
@@ -365,7 +477,13 @@ where
 
     draw_state(&mut terminal, &state)?;
     load_deliveries(&mut state, api, token).await;
-    run_event_loop(&mut terminal, &mut state, api, token).await
+    state.start_stream();
+    let stream_events = spawn_stream_worker(
+        api.clone(),
+        token.clone(),
+        state.stream_resume_cursor().cloned(),
+    );
+    run_event_loop(&mut terminal, &mut state, api, token, &stream_events).await
 }
 
 async fn run_event_loop<B, A>(
@@ -373,12 +491,14 @@ async fn run_event_loop<B, A>(
     state: &mut AppState,
     api: &A,
     token: &BearerToken,
+    stream_events: &mpsc::Receiver<StreamWorkerMessage>,
 ) -> Result<(), TuiError>
 where
     B: Backend<Error = io::Error>,
     A: DeliveryApi,
 {
     loop {
+        drain_stream_events(state, stream_events);
         draw_state(terminal, state)?;
 
         if !event::poll(EVENT_POLL_INTERVAL).map_err(|source| TuiError::Terminal { source })? {
@@ -403,6 +523,83 @@ where
                 draw_state(terminal, state)?;
                 load_detail(state, api, token, &public_delivery_id).await;
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum StreamWorkerMessage {
+    Frames(Vec<DeliveryStreamFrame>),
+    Error(ApiError),
+}
+
+fn spawn_stream_worker<A>(
+    api: A,
+    token: BearerToken,
+    initial_after: Option<StreamCursor>,
+) -> mpsc::Receiver<StreamWorkerMessage>
+where
+    A: DeliveryApi + Send + Sync + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+
+    tokio::spawn(async move {
+        let mut after = initial_after;
+
+        loop {
+            match api.stream_deliveries(&token, after.as_ref()).await {
+                Ok(frames) => {
+                    if let Some(cursor) = latest_stream_cursor(&frames) {
+                        after = Some(cursor);
+                    }
+
+                    let received_empty_batch = frames.is_empty();
+                    if sender.send(StreamWorkerMessage::Frames(frames)).is_err() {
+                        break;
+                    }
+
+                    if received_empty_batch {
+                        tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
+                    }
+                }
+                Err(error) => {
+                    let is_authentication_error = matches!(error, ApiError::Authentication { .. });
+
+                    if sender.send(StreamWorkerMessage::Error(error)).is_err() {
+                        break;
+                    }
+
+                    if is_authentication_error {
+                        break;
+                    }
+
+                    tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
+                }
+            }
+        }
+    });
+
+    receiver
+}
+
+fn drain_stream_events(state: &mut AppState, stream_events: &mpsc::Receiver<StreamWorkerMessage>) {
+    while let Ok(message) = stream_events.try_recv() {
+        match message {
+            StreamWorkerMessage::Frames(frames) => state.receive_stream_frames(frames),
+            StreamWorkerMessage::Error(error) => state.receive_stream_error(&error),
+        }
+    }
+}
+
+fn latest_stream_cursor(frames: &[DeliveryStreamFrame]) -> Option<StreamCursor> {
+    frames.iter().filter_map(frame_cursor).next_back()
+}
+
+fn frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
+    match frame {
+        DeliveryStreamFrame::Cursor(cursor) => Some(cursor.clone()),
+        DeliveryStreamFrame::Delivery { cursor, item } => {
+            cursor.clone().or_else(|| item.cursor().cloned())
         }
     }
 }
@@ -504,17 +701,28 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    let status = match state.feed_status() {
+    let feed = match state.feed_status() {
         FeedStatus::Loading => "loading",
-        FeedStatus::Ready => "live",
+        FeedStatus::Ready => "ready",
         FeedStatus::Empty => "empty",
         FeedStatus::Error(error) => error.heading(),
+    };
+    let stream = match state.stream_status() {
+        StreamStatus::Disconnected => "disconnected".to_owned(),
+        StreamStatus::Connecting => "connecting".to_owned(),
+        StreamStatus::Live => "live".to_owned(),
+        StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
+        StreamStatus::Error(error) => error.heading().to_owned(),
     };
     let selected = state
         .selected_index()
         .map(|index| format!("row {}", index + 1))
         .unwrap_or_else(|| "no row".to_owned());
-    let cursor = state
+    let resume = state
+        .stream_resume_cursor()
+        .map(|cursor| cursor.as_str().to_owned())
+        .unwrap_or_else(|| "-".to_owned());
+    let history = state
         .next_cursor()
         .map(|cursor| cursor.as_str().to_owned())
         .unwrap_or_else(|| "-".to_owned());
@@ -526,11 +734,15 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::raw(format!("status: {status}")),
+        Span::raw(format!("feed: {feed}")),
+        Span::raw("  "),
+        Span::raw(format!("stream: {stream}")),
         Span::raw("  "),
         Span::raw(format!("selected: {selected}")),
         Span::raw("  "),
-        Span::raw(format!("cursor: {cursor}")),
+        Span::raw(format!("resume: {resume}")),
+        Span::raw("  "),
+        Span::raw(format!("history: {history}")),
     ]);
 
     frame.render_widget(
@@ -705,12 +917,17 @@ impl Error for TuiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppCommand, AppErrorKind, AppState, DetailStatus, FeedStatus, KeyAction, Screen};
-    use crate::api::{
-        ApiError, DeliveryDetail, DeliveryListItem, DeliveryListPage, DeliveryStatus, MatchedRoute,
-        PublicDeliveryId, StreamCursor, TransportError,
+    use super::{
+        AppCommand, AppErrorKind, AppState, DetailStatus, FeedStatus, KeyAction, Screen,
+        StreamStatus,
     };
+    use crate::api::{
+        ApiError, DeliveryDetail, DeliveryListItem, DeliveryListPage, DeliveryStatus,
+        DeliveryStreamFrame, MatchedRoute, PublicDeliveryId, StreamCursor, TransportError,
+    };
+    use crate::credentials::BearerToken;
     use ratatui::{Terminal, backend::TestBackend};
+    use std::time::Duration;
 
     #[test]
     fn loading_deliveries_populates_rows_and_selects_the_first_item() {
@@ -800,6 +1017,106 @@ mod tests {
     }
 
     #[test]
+    fn stream_frames_insert_rows_deduplicate_replays_track_resume_and_show_auth_errors() {
+        let mut state = AppState::default();
+        state.receive_delivery_page(DeliveryListPage::new(
+            vec![delivery_with_cursor(
+                "del_pub_01",
+                "CPU alert routed to ops",
+                Some("Datadog"),
+                Some("cur_01"),
+            )],
+            Some(StreamCursor::new("cur_history").unwrap()),
+        ));
+
+        assert_eq!(
+            state.stream_resume_cursor().map(StreamCursor::as_str),
+            Some("cur_01")
+        );
+
+        state.start_stream();
+        assert_eq!(state.stream_status(), &StreamStatus::Connecting);
+
+        let replayed_delivery = delivery("del_pub_02", "Deploy complete", Some("GitHub"));
+        state.receive_stream_frames(vec![
+            DeliveryStreamFrame::Delivery {
+                cursor: Some(StreamCursor::new("cur_02").unwrap()),
+                item: replayed_delivery.clone(),
+            },
+            DeliveryStreamFrame::Delivery {
+                cursor: Some(StreamCursor::new("cur_02").unwrap()),
+                item: replayed_delivery,
+            },
+            DeliveryStreamFrame::Cursor(StreamCursor::new("cur_03").unwrap()),
+        ]);
+
+        assert_eq!(state.stream_status(), &StreamStatus::Live);
+        assert_eq!(state.deliveries().len(), 2);
+        assert_eq!(
+            state.deliveries()[0].public_delivery_id().as_str(),
+            "del_pub_02"
+        );
+        assert_eq!(
+            state.stream_resume_cursor().map(StreamCursor::as_str),
+            Some("cur_03")
+        );
+
+        state.receive_stream_error(&ApiError::Authentication {
+            operation: "streaming deliveries",
+            status: 401,
+            body: "token_expired".to_owned(),
+        });
+
+        let StreamStatus::Error(error) = state.stream_status() else {
+            panic!("expected visible stream auth error");
+        };
+        assert_eq!(error.kind(), AppErrorKind::Authentication);
+        assert!(error.message().contains("stored token"));
+
+        let rendered = render_text(&state);
+        assert!(rendered.contains("stream: Authentication error"));
+        assert!(rendered.contains("resume: cur_03"));
+    }
+
+    #[tokio::test]
+    async fn stream_worker_reconnects_with_latest_seen_cursor() {
+        let api = ScriptedStreamApi::new(vec![
+            StreamResponse::Frames(vec![DeliveryStreamFrame::Delivery {
+                cursor: Some(StreamCursor::new("cur_02").unwrap()),
+                item: delivery("del_pub_02", "Deploy complete", Some("GitHub")),
+            }]),
+            StreamResponse::AuthError,
+        ]);
+        let receiver = super::spawn_stream_worker(
+            api.clone(),
+            BearerToken::new("destination-token").unwrap(),
+            Some(StreamCursor::new("cur_01").unwrap()),
+        );
+
+        match recv_stream_message(&receiver).await {
+            super::StreamWorkerMessage::Frames(frames) => assert_eq!(frames.len(), 1),
+            super::StreamWorkerMessage::Error(error) => {
+                panic!("expected stream frames, got {error}")
+            }
+        }
+
+        match recv_stream_message(&receiver).await {
+            super::StreamWorkerMessage::Error(ApiError::Authentication { status: 401, .. }) => {}
+            super::StreamWorkerMessage::Error(error) => {
+                panic!("expected stream auth error, got {error}")
+            }
+            super::StreamWorkerMessage::Frames(frames) => {
+                panic!("expected stream auth error, got {frames:?}")
+            }
+        }
+
+        assert_eq!(
+            api.observed_after_values(),
+            vec![Some("cur_01".to_owned()), Some("cur_02".to_owned())]
+        );
+    }
+
+    #[test]
     fn empty_auth_and_network_states_are_visible_without_terminal_io() {
         let mut state = AppState::default();
 
@@ -868,13 +1185,22 @@ mod tests {
         headline: &str,
         source_context: Option<&str>,
     ) -> DeliveryListItem {
+        delivery_with_cursor(public_delivery_id, headline, source_context, None)
+    }
+
+    fn delivery_with_cursor(
+        public_delivery_id: &str,
+        headline: &str,
+        source_context: Option<&str>,
+        cursor: Option<&str>,
+    ) -> DeliveryListItem {
         DeliveryListItem::new(
             PublicDeliveryId::new(public_delivery_id).unwrap(),
             headline,
             source_context.map(str::to_owned),
             DeliveryStatus::new("delivered").unwrap(),
             Some("2026-06-04T02:03:04Z".to_owned()),
-            None,
+            cursor.map(|cursor| StreamCursor::new(cursor).unwrap()),
         )
         .unwrap()
     }
@@ -908,5 +1234,93 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    async fn recv_stream_message(
+        receiver: &std::sync::mpsc::Receiver<super::StreamWorkerMessage>,
+    ) -> super::StreamWorkerMessage {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match receiver.try_recv() {
+                    Ok(message) => return message,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("stream worker disconnected before sending a message")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("stream worker message")
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedStreamApi {
+        responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<StreamResponse>>>,
+        observed_after_values: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl ScriptedStreamApi {
+        fn new(responses: Vec<StreamResponse>) -> Self {
+            Self {
+                responses: std::sync::Arc::new(std::sync::Mutex::new(responses.into())),
+                observed_after_values: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn observed_after_values(&self) -> Vec<Option<String>> {
+            self.observed_after_values.lock().unwrap().clone()
+        }
+    }
+
+    #[derive(Debug)]
+    enum StreamResponse {
+        Frames(Vec<DeliveryStreamFrame>),
+        AuthError,
+    }
+
+    impl super::DeliveryApi for ScriptedStreamApi {
+        async fn list_deliveries(
+            &self,
+            _token: &BearerToken,
+        ) -> Result<DeliveryListPage, ApiError> {
+            panic!("stream worker should not list deliveries")
+        }
+
+        async fn get_delivery(
+            &self,
+            _token: &BearerToken,
+            _public_delivery_id: &PublicDeliveryId,
+        ) -> Result<DeliveryDetail, ApiError> {
+            panic!("stream worker should not load delivery detail")
+        }
+
+        async fn stream_deliveries(
+            &self,
+            _token: &BearerToken,
+            after: Option<&StreamCursor>,
+        ) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
+            self.observed_after_values
+                .lock()
+                .unwrap()
+                .push(after.map(StreamCursor::as_str).map(str::to_owned));
+
+            match self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted stream response")
+            {
+                StreamResponse::Frames(frames) => Ok(frames),
+                StreamResponse::AuthError => Err(ApiError::Authentication {
+                    operation: "streaming deliveries",
+                    status: 401,
+                    body: "token_expired".to_owned(),
+                }),
+            }
+        }
     }
 }

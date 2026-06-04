@@ -25,7 +25,7 @@ The first release is planned around two commands:
 
 `meshh login` starts Meshh device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed.
 
-`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route-feed view with headline, source, status, and detected-time columns. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, detected time, source context, source URL, matched routes, and summary/body text when provided.
+`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route-feed view with headline, source, status, and detected-time columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, detected time, source context, source URL, matched routes, and summary/body text when provided.
 
 ## Configuration
 

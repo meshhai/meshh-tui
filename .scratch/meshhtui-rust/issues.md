@@ -91,7 +91,7 @@ Implement `meshh tui` with a list view and detail view for route deliveries.
 
 ## 6. Live Stream And Resume
 
-Status: ready-for-agent  
+Status: completed  
 Type: AFK  
 Blocked by: Issues 4, 5
 
@@ -101,11 +101,11 @@ Connect the TUI to the stream endpoint so new deliveries appear while the app is
 
 ### Acceptance criteria
 
-- [ ] Streamed delivery events update the list without duplicating exact cursor replays.
-- [ ] The client tracks the latest cursor seen in the current session.
-- [ ] Reconnect uses the latest cursor as the `after` parameter.
-- [ ] Stream errors move the app into a visible reconnecting/error state.
-- [ ] Tests cover stream insert, exact duplicate suppression, reconnect resume, and auth failure.
+- [x] Streamed delivery events update the list without duplicating exact cursor replays.
+- [x] The client tracks the latest cursor seen in the current session.
+- [x] Reconnect uses the latest cursor as the `after` parameter.
+- [x] Stream errors move the app into a visible reconnecting/error state.
+- [x] Tests cover stream insert, exact duplicate suppression, reconnect resume, and auth failure.
 
 ## 7. Open-Source Release Hardening
 
