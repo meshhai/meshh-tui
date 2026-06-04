@@ -72,7 +72,7 @@ Implement typed API calls for delivery list, delivery detail, and stream frames.
 
 ## 5. TUI List And Detail Experience
 
-Status: ready-for-agent  
+Status: completed  
 Type: AFK  
 Blocked by: Issue 4
 
@@ -82,12 +82,12 @@ Implement `meshh tui` with a list view and detail view for route deliveries.
 
 ### Acceptance criteria
 
-- [ ] Startup loads recent deliveries and renders headline rows.
-- [ ] Rows show headline, source context, status, and detected time when available.
-- [ ] Keyboard navigation supports up/down, open detail, back, refresh, and quit.
-- [ ] Detail view shows headline, summary/body, source URL, matched routes, and status.
-- [ ] Empty, loading, auth error, and network error states are visible and non-crashing.
-- [ ] App state transitions are unit tested without terminal IO.
+- [x] Startup loads recent deliveries and renders headline rows.
+- [x] Rows show headline, source context, status, and detected time when available.
+- [x] Keyboard navigation supports up/down, open detail, back, refresh, and quit.
+- [x] Detail view shows headline, summary/body, source URL, matched routes, and status.
+- [x] Empty, loading, auth error, and network error states are visible and non-crashing.
+- [x] App state transitions are unit tested without terminal IO.
 
 ## 6. Live Stream And Resume
 

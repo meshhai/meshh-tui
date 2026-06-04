@@ -1,6 +1,6 @@
 use std::io;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::{
@@ -8,6 +8,7 @@ use crate::{
     config::RuntimeConfig,
     credentials::FileCredentialStore,
     login::{self, LoginError, LoginOptions, TokioLoginSleeper},
+    tui,
 };
 
 /// Command-line arguments for the Meshh terminal client.
@@ -42,7 +43,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Login => run_login_command(&config).await,
-        Command::Tui => bail!("`meshh tui` is not implemented yet"),
+        Command::Tui => tui::run(&config).await.map_err(Into::into),
     }
 }
 
