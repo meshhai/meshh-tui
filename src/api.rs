@@ -8,6 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::config::RuntimeConfig;
 use crate::credentials::BearerToken;
@@ -217,17 +218,18 @@ impl DeviceAuthorizationResponse {
         }
 
         if let Some(expires_at) = self.expires_at.as_deref() {
-            let expires_at_epoch_secs = parse_utc_rfc3339_epoch_secs(expires_at)?;
+            let expires_at = parse_expires_at(expires_at)?;
+            let expires_at_epoch_secs = expires_at.unix_timestamp();
             let now_epoch_secs = now
                 .duration_since(UNIX_EPOCH)
                 .map_err(|source| ApiError::InvalidResponse {
                     message: format!("system clock is before Unix epoch: {source}"),
                 })?
-                .as_secs();
-            let remaining = expires_at_epoch_secs.saturating_sub(now_epoch_secs);
+                .as_secs() as i64;
+            let remaining = expires_at_epoch_secs - now_epoch_secs;
 
             if remaining > 0 {
-                return Ok(remaining);
+                return Ok(remaining as u64);
             }
 
             return Err(ApiError::InvalidResponse {
@@ -242,94 +244,19 @@ impl DeviceAuthorizationResponse {
     }
 }
 
-fn parse_utc_rfc3339_epoch_secs(value: &str) -> Result<u64, ApiError> {
+fn parse_expires_at(value: &str) -> Result<OffsetDateTime, ApiError> {
     let trimmed = value.trim();
-    let timestamp = trimmed
-        .strip_suffix('Z')
-        .ok_or_else(|| invalid_expires_at(trimmed))?;
-    let (date, time) = timestamp
-        .split_once('T')
-        .ok_or_else(|| invalid_expires_at(trimmed))?;
-    let mut date_parts = date.split('-');
-    let year = parse_expires_at_part(trimmed, date_parts.next())?;
-    let month = parse_expires_at_part(trimmed, date_parts.next())?;
-    let day = parse_expires_at_part(trimmed, date_parts.next())?;
 
-    if date_parts.next().is_some() {
-        return Err(invalid_expires_at(trimmed));
-    }
-
-    let mut time_parts = time.split(':');
-    let hour = parse_expires_at_part(trimmed, time_parts.next())?;
-    let minute = parse_expires_at_part(trimmed, time_parts.next())?;
-    let second_part = time_parts
-        .next()
-        .ok_or_else(|| invalid_expires_at(trimmed))?;
-    let second = parse_expires_at_part(
-        trimmed,
-        Some(
-            second_part
-                .split_once('.')
-                .map_or(second_part, |(second, _fraction)| second),
-        ),
-    )?;
-
-    if time_parts.next().is_some()
-        || !(1..=12).contains(&month)
-        || !(1..=days_in_month(year, month)).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return Err(invalid_expires_at(trimmed));
-    }
-
-    let days = days_from_civil(year, month, day);
-    if days < 0 {
-        return Err(invalid_expires_at(trimmed));
-    }
-
-    Ok(days as u64 * 86_400 + hour as u64 * 3_600 + minute as u64 * 60 + second as u64)
+    OffsetDateTime::parse(trimmed, &Rfc3339).map_err(|source| invalid_expires_at(trimmed, source))
 }
 
-fn parse_expires_at_part(value: &str, part: Option<&str>) -> Result<i64, ApiError> {
-    part.filter(|part| !part.is_empty())
-        .and_then(|part| part.parse::<i64>().ok())
-        .ok_or_else(|| invalid_expires_at(value))
-}
-
-fn invalid_expires_at(value: &str) -> ApiError {
+fn invalid_expires_at(value: &str, source: time::error::Parse) -> ApiError {
     ApiError::InvalidResponse {
         message: format!(
-            "device authorization response had an invalid expires_at `{}`",
+            "device authorization response had an invalid expires_at `{}`: {source}",
             clipped(value)
         ),
     }
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn leap_year(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-    era * 146_097 + day_of_era - 719_468
 }
 
 fn default_device_poll_interval_secs() -> u64 {
@@ -1486,25 +1413,33 @@ struct DeliveryStreamParser {
 impl DeliveryStreamParser {
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
         self.buffer.extend_from_slice(chunk);
-        if self.buffer.len() > MAX_SSE_EVENT_BYTES {
-            self.buffer.clear();
-            return Err(ApiError::InvalidResponse {
-                message: format!(
-                    "delivery stream event exceeded {} bytes",
-                    MAX_SSE_EVENT_BYTES
-                ),
-            });
-        }
-
         let mut frames = Vec::new();
+        let mut consumed = 0;
 
-        while let Some((index, separator_len)) = next_sse_message_separator(&self.buffer) {
-            let block = self.buffer[..index].to_vec();
-            self.buffer.drain(..index + separator_len);
+        while let Some((block_end, separator_len)) =
+            next_sse_message_separator_from(&self.buffer, consumed)
+        {
+            if block_end - consumed > MAX_SSE_EVENT_BYTES {
+                self.buffer.clear();
+                return Err(oversized_sse_event_error());
+            }
 
-            if let Some(frame) = parse_sse_message_bytes(&block)? {
+            let block_start = consumed;
+
+            if let Some(frame) = parse_sse_message_bytes(&self.buffer[block_start..block_end])? {
                 frames.push(frame);
             }
+
+            consumed = block_end + separator_len;
+        }
+
+        if consumed > 0 {
+            self.buffer.drain(..consumed);
+        }
+
+        if self.buffer.len() > MAX_SSE_EVENT_BYTES {
+            self.buffer.clear();
+            return Err(oversized_sse_event_error());
         }
 
         Ok(frames)
@@ -1521,20 +1456,34 @@ impl DeliveryStreamParser {
     }
 }
 
-fn next_sse_message_separator(buffer: &[u8]) -> Option<(usize, usize)> {
-    [
-        b"\r\n\r\n".as_slice(),
-        b"\n\n".as_slice(),
-        b"\r\r".as_slice(),
-    ]
-    .into_iter()
-    .filter_map(|separator| {
-        buffer
-            .windows(separator.len())
-            .position(|window| window == separator)
-            .map(|index| (index, separator.len()))
-    })
-    .min_by_key(|(index, _)| *index)
+fn oversized_sse_event_error() -> ApiError {
+    ApiError::InvalidResponse {
+        message: format!(
+            "delivery stream event exceeded {} bytes",
+            MAX_SSE_EVENT_BYTES
+        ),
+    }
+}
+
+fn next_sse_message_separator_from(buffer: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+
+    while index < buffer.len() {
+        match buffer[index] {
+            b'\r' if buffer.get(index..index + 4) == Some(b"\r\n\r\n") => {
+                return Some((index, 4));
+            }
+            b'\r' if buffer.get(index + 1) == Some(&b'\r') => {
+                return Some((index, 2));
+            }
+            b'\n' if buffer.get(index + 1) == Some(&b'\n') => {
+                return Some((index, 2));
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
 }
 
 #[derive(Debug)]
@@ -2262,6 +2211,23 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("delivery stream event exceeded"));
+        assert!(parser.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn accepts_large_chunks_containing_many_small_stream_events() {
+        let mut parser = super::DeliveryStreamParser::default();
+        let event = b"event: cursor\ndata: cur_01\n\n";
+        let repeat_count = super::MAX_SSE_EVENT_BYTES / event.len() + 1;
+        let mut chunk = Vec::with_capacity(event.len() * repeat_count);
+
+        for _index in 0..repeat_count {
+            chunk.extend_from_slice(event);
+        }
+
+        let frames = parser.push_chunk(&chunk).unwrap();
+
+        assert_eq!(frames.len(), repeat_count);
         assert!(parser.finish().unwrap().is_empty());
     }
 
