@@ -186,7 +186,7 @@ fn write_login_instructions(
 fn default_max_poll_attempts(authorization: &DeviceAuthorization) -> usize {
     let expires_secs = authorization.expires_in().as_secs();
     let interval_secs = authorization.poll_interval().as_secs().max(1);
-    let attempts = expires_secs / interval_secs;
+    let attempts = expires_secs.div_ceil(interval_secs);
 
     attempts.max(1) as usize
 }
@@ -269,6 +269,39 @@ mod tests {
         assert_eq!(
             credentials.load_token().unwrap().unwrap().as_str(),
             "approved-after-pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_poll_attempts_cover_non_multiple_expiration_windows() {
+        let api = ScriptedDeviceLoginApi::new(
+            authorization_with_expiry_and_interval(Duration::from_secs(6), Duration::from_secs(5)),
+            [
+                DeviceTokenPoll::Pending,
+                DeviceTokenPoll::Approved {
+                    token: BearerToken::new("approved-before-expiry").unwrap(),
+                },
+            ],
+        );
+        let credentials = MemoryCredentialStore::default();
+        let sleeper = RecordingSleeper::default();
+        let mut output = Vec::new();
+
+        run_device_login(
+            &api,
+            &credentials,
+            &sleeper,
+            &mut output,
+            LoginOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.poll_count(), 2);
+        assert_eq!(sleeper.sleep_durations(), vec![Duration::from_secs(5)]);
+        assert_eq!(
+            credentials.load_token().unwrap().unwrap().as_str(),
+            "approved-before-expiry"
         );
     }
 
@@ -429,13 +462,20 @@ mod tests {
     }
 
     fn authorization() -> DeviceAuthorization {
+        authorization_with_expiry_and_interval(Duration::from_secs(600), Duration::from_secs(5))
+    }
+
+    fn authorization_with_expiry_and_interval(
+        expires_in: Duration,
+        poll_interval: Duration,
+    ) -> DeviceAuthorization {
         DeviceAuthorization::new(
             DeviceCode::new(format!("device-{}", unique_suffix())).unwrap(),
             UserCode::new("ABCD-EFGH").unwrap(),
             "https://mesh.example/device",
             Some("https://mesh.example/device?user_code=ABCD-EFGH".to_owned()),
-            Duration::from_secs(600),
-            Duration::from_secs(5),
+            expires_in,
+            poll_interval,
         )
         .unwrap()
     }

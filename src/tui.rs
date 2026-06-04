@@ -260,6 +260,8 @@ impl AppState {
 
     /// Applies stream frames, prepending new deliveries and suppressing cursor replays.
     pub fn receive_stream_frames(&mut self, frames: Vec<DeliveryStreamFrame>) {
+        let mut inserted_delivery = false;
+
         for frame in frames {
             match frame {
                 DeliveryStreamFrame::Connected => {}
@@ -275,15 +277,19 @@ impl AppState {
                     }
 
                     self.insert_or_replace_stream_delivery(item);
+                    inserted_delivery = true;
                 }
             }
         }
 
-        self.feed_status = if self.deliveries.is_empty() {
-            FeedStatus::Empty
-        } else {
-            FeedStatus::Ready
-        };
+        if inserted_delivery {
+            self.feed_status = if self.deliveries.is_empty() {
+                FeedStatus::Empty
+            } else {
+                FeedStatus::Ready
+            };
+        }
+
         self.stream_status = StreamStatus::Live;
     }
 
@@ -1185,6 +1191,27 @@ mod tests {
         state.receive_stream_frames(vec![DeliveryStreamFrame::Connected]);
 
         assert_eq!(state.feed_status(), &FeedStatus::Empty);
+        assert_eq!(state.stream_status(), &StreamStatus::Live);
+        assert!(state.deliveries().is_empty());
+    }
+
+    #[test]
+    fn stream_metadata_frames_do_not_hide_feed_load_errors() {
+        let mut state = AppState::default();
+        state.receive_list_error(&ApiError::Transport {
+            source: TransportError::new("connection refused"),
+        });
+        state.start_stream();
+
+        state.receive_stream_frames(vec![
+            DeliveryStreamFrame::Connected,
+            DeliveryStreamFrame::Cursor(StreamCursor::new("cur_01").unwrap()),
+        ]);
+
+        let FeedStatus::Error(error) = state.feed_status() else {
+            panic!("expected feed error to remain visible");
+        };
+        assert_eq!(error.kind(), AppErrorKind::Network);
         assert_eq!(state.stream_status(), &StreamStatus::Live);
         assert!(state.deliveries().is_empty());
     }
