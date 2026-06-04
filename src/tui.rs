@@ -838,11 +838,7 @@ fn render_detail(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
 
     frame.render_widget(
         Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Delivery Detail"),
-            )
+            .block(Block::default().borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         area,
     );

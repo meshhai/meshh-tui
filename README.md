@@ -52,7 +52,6 @@ up/down select | enter open | r refresh | q quit
 Enter
 
 +------------------------------------------------------------------------------+
-|Delivery Detail                                                               |
 |CPU alert routed to ops                                                       |
 |                                                                              |
 |Status: delivered                                                             |
