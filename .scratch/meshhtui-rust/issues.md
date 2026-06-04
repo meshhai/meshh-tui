@@ -121,6 +121,6 @@ Prepare the repo for a first alpha release.
 
 - [ ] README includes screenshots or an asciinema-style terminal example.
 - [x] License, contribution notes, and security/reporting guidance are present.
-- [ ] CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- [x] CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - [ ] Release build works locally.
 - [ ] No secrets, internal Meshh IDs, or local-only paths are committed.
