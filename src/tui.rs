@@ -262,6 +262,7 @@ impl AppState {
     pub fn receive_stream_frames(&mut self, frames: Vec<DeliveryStreamFrame>) {
         for frame in frames {
             match frame {
+                DeliveryStreamFrame::Connected => {}
                 DeliveryStreamFrame::Cursor(cursor) => self.note_stream_cursor(cursor),
                 DeliveryStreamFrame::Delivery { cursor, item } => {
                     let cursor = cursor.or_else(|| item.cursor().cloned());
@@ -610,6 +611,7 @@ fn drain_stream_events(state: &mut AppState, stream_events: &mpsc::Receiver<Stre
 
 fn frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
     match frame {
+        DeliveryStreamFrame::Connected => None,
         DeliveryStreamFrame::Cursor(cursor) => Some(cursor.clone()),
         DeliveryStreamFrame::Delivery { cursor, item } => {
             cursor.clone().or_else(|| item.cursor().cloned())
@@ -1086,6 +1088,19 @@ mod tests {
         let rendered = render_text(&state);
         assert!(rendered.contains("stream: Authentication error"));
         assert!(rendered.contains("resume: cur_03"));
+    }
+
+    #[test]
+    fn connected_stream_frame_marks_empty_feed_live() {
+        let mut state = AppState::default();
+        state.receive_delivery_page(DeliveryListPage::new(Vec::new(), None));
+        state.start_stream();
+
+        state.receive_stream_frames(vec![DeliveryStreamFrame::Connected]);
+
+        assert_eq!(state.feed_status(), &FeedStatus::Empty);
+        assert_eq!(state.stream_status(), &StreamStatus::Live);
+        assert!(state.deliveries().is_empty());
     }
 
     #[tokio::test]

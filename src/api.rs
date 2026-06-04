@@ -1,6 +1,6 @@
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{env, error::Error, fmt, future::Future, time::Duration};
 
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::config::RuntimeConfig;
@@ -10,8 +10,29 @@ const DEVICE_AUTHORIZATION_PATH: &str = "/api/v1/tui/device-authorizations";
 const DEVICE_TOKEN_PATH: &str = "/api/v1/tui/device-tokens";
 const DELIVERY_LIST_PATH: &str = "/api/v1/destination/deliveries";
 const DELIVERY_STREAM_PATH: &str = "/api/v1/destination/stream";
+const CLIENT_NAME: &str = "meshh-tui";
+const DEFAULT_DEVICE_AUTHORIZATION_EXPIRES_IN_SECS: u64 = 600;
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Serialize)]
+struct DeviceAuthorizationRequest {
+    device_name: String,
+    client_name: &'static str,
+    client_version: &'static str,
+    platform: String,
+}
+
+impl DeviceAuthorizationRequest {
+    fn current_device() -> Self {
+        Self {
+            device_name: default_device_name(),
+            client_name: CLIENT_NAME,
+            client_version: env!("CARGO_PKG_VERSION"),
+            platform: format!("{}-{}", env::consts::OS, env::consts::ARCH),
+        }
+    }
+}
 
 /// Opaque code used to poll for a device authorization result.
 #[derive(Clone, PartialEq, Eq)]
@@ -157,7 +178,10 @@ struct DeviceAuthorizationResponse {
     verification_url: String,
     #[serde(default, alias = "verification_uri_complete")]
     verification_url_complete: Option<String>,
-    expires_in: u64,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    expires_at: Option<String>,
     #[serde(default = "default_device_poll_interval_secs", alias = "poll_interval")]
     interval: u64,
 }
@@ -166,14 +190,37 @@ impl TryFrom<DeviceAuthorizationResponse> for DeviceAuthorization {
     type Error = ApiError;
 
     fn try_from(response: DeviceAuthorizationResponse) -> Result<Self, Self::Error> {
+        let expires_in = response.expires_in_secs()?;
+
         Self::new(
             DeviceCode::new(response.device_code)?,
             UserCode::new(response.user_code)?,
             response.verification_url,
             response.verification_url_complete,
-            Duration::from_secs(response.expires_in),
+            Duration::from_secs(expires_in),
             Duration::from_secs(response.interval),
         )
+    }
+}
+
+impl DeviceAuthorizationResponse {
+    fn expires_in_secs(&self) -> Result<u64, ApiError> {
+        if let Some(expires_in) = self.expires_in {
+            return Ok(expires_in);
+        }
+
+        if self
+            .expires_at
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Ok(DEFAULT_DEVICE_AUTHORIZATION_EXPIRES_IN_SECS);
+        }
+
+        Err(ApiError::InvalidResponse {
+            message: "device authorization response did not include expires_in or expires_at"
+                .to_owned(),
+        })
     }
 }
 
@@ -206,32 +253,31 @@ struct DeviceTokenResponse {
 
 impl DeviceTokenResponse {
     fn into_poll(self) -> Result<DeviceTokenPoll, ApiError> {
-        let status = self
-            .status
-            .as_deref()
-            .or(self.error.as_deref())
-            .ok_or_else(|| ApiError::InvalidResponse {
-                message: "device-token response did not include a status".to_owned(),
-            })?;
+        let Self {
+            status,
+            error,
+            access_token,
+            token,
+        } = self;
+        let bearer_token = access_token.or(token);
+        let Some(status) = status.as_deref().or(error.as_deref()) else {
+            return bearer_token
+                .ok_or_else(|| ApiError::InvalidResponse {
+                    message: "device-token response did not include a status or bearer token"
+                        .to_owned(),
+                })
+                .and_then(approved_device_token_poll);
+        };
         let normalized_status = status.trim().to_ascii_lowercase();
 
         match normalized_status.as_str() {
             "approved" | "complete" | "completed" => {
-                let token =
-                    self.access_token
-                        .or(self.token)
-                        .ok_or_else(|| ApiError::InvalidResponse {
-                            message:
-                                "approved device-token response did not include a bearer token"
-                                    .to_owned(),
-                        })?;
+                let token = bearer_token.ok_or_else(|| ApiError::InvalidResponse {
+                    message: "approved device-token response did not include a bearer token"
+                        .to_owned(),
+                })?;
 
-                BearerToken::new(token)
-                    .map(|token| DeviceTokenPoll::Approved { token })
-                    .map_err(|_| ApiError::InvalidResponse {
-                        message: "approved device-token response had an empty bearer token"
-                            .to_owned(),
-                    })
+                approved_device_token_poll(token)
             }
             "pending" | "authorization_pending" => Ok(DeviceTokenPoll::Pending),
             "slow_down" => Ok(DeviceTokenPoll::SlowDown),
@@ -246,6 +292,14 @@ impl DeviceTokenResponse {
             }),
         }
     }
+}
+
+fn approved_device_token_poll(token: String) -> Result<DeviceTokenPoll, ApiError> {
+    BearerToken::new(token)
+        .map(|token| DeviceTokenPoll::Approved { token })
+        .map_err(|_| ApiError::InvalidResponse {
+            message: "approved device-token response had an empty bearer token".to_owned(),
+        })
 }
 
 /// Public delivery identifier exposed by the Meshh destination API.
@@ -552,6 +606,7 @@ impl DeliveryDetail {
 /// Parsed server-sent stream frame from the delivery stream endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryStreamFrame {
+    Connected,
     Cursor(StreamCursor),
     Delivery {
         cursor: Option<StreamCursor>,
@@ -830,7 +885,12 @@ where
         let url = self.endpoint(DEVICE_AUTHORIZATION_PATH);
 
         let response = transport
-            .post_json(url, json!({}))
+            .post_json(
+                url,
+                serde_json::to_value(DeviceAuthorizationRequest::current_device()).expect(
+                    "serializing device authorization request cannot fail for primitive fields",
+                ),
+            )
             .await
             .map_err(|source| ApiError::Transport { source })?;
         let response: DeviceAuthorizationResponse =
@@ -912,6 +972,13 @@ where
                             return Err(TransportError::new("invalid delivery stream response"));
                         }
                     };
+
+                    if frames.is_empty()
+                        && let Err(error) = on_frame(DeliveryStreamFrame::Connected)
+                    {
+                        stream_error = Some(error);
+                        return Err(TransportError::new("delivery stream frame handler failed"));
+                    }
 
                     for frame in frames {
                         if let Err(error) = on_frame(frame) {
@@ -1106,6 +1173,8 @@ impl HttpTransport for ReqwestTransport {
             return Ok(HttpResponse::new(status, body.to_vec()));
         }
 
+        on_chunk(&[])?;
+
         while let Some(chunk) = response.chunk().await.map_err(|source| {
             TransportError::with_source("network error while reading response body", source)
         })? {
@@ -1215,6 +1284,23 @@ fn clipped(value: &str) -> String {
 
 fn non_empty_optional(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+fn default_device_name() -> String {
+    env::var("MESHH_TUI_DEVICE_NAME")
+        .ok()
+        .and_then(non_empty_string)
+        .or_else(|| env::var("HOSTNAME").ok().and_then(non_empty_string))
+        .or_else(|| env::var("COMPUTERNAME").ok().and_then(non_empty_string))
+        .unwrap_or_else(|| CLIENT_NAME.to_owned())
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Parses server-sent events returned by the delivery stream endpoint.
@@ -1571,12 +1657,93 @@ mod tests {
     }
 
     #[test]
+    fn decodes_mesh_device_authorization_response_with_expires_at() {
+        let response: super::DeviceAuthorizationResponse = parse_success_json(
+            HttpResponse::new(
+                201,
+                br#"{
+                    "device_code": "device-code",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://mesh.example/en/tui/login",
+                    "verification_uri_complete": "https://mesh.example/en/tui/login?code=ABCD-EFGH",
+                    "expires_at": "2026-06-04T09:29:52Z",
+                    "interval": 5
+                }"#,
+            ),
+            "creating a device authorization",
+        )
+        .unwrap();
+        let authorization = DeviceAuthorization::try_from(response).unwrap();
+
+        assert_eq!(authorization.device_code().as_str(), "device-code");
+        assert_eq!(
+            authorization.verification_url(),
+            "https://mesh.example/en/tui/login"
+        );
+        assert_eq!(authorization.expires_in(), Duration::from_secs(600));
+        assert_eq!(authorization.poll_interval(), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn create_device_authorization_sends_public_device_metadata() {
+        let observed_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = ApiClient::with_transport(
+            ApiClientConfig::new("https://mesh.example").unwrap(),
+            ObservedPostTransport {
+                response: HttpResponse::new(
+                    201,
+                    br#"{
+                        "device_code": "device-code",
+                        "user_code": "ABCD-EFGH",
+                        "verification_uri": "https://mesh.example/device",
+                        "expires_in": 600,
+                        "interval": 5
+                    }"#,
+                ),
+                observed_requests: observed_requests.clone(),
+            },
+        );
+
+        let authorization = client.create_device_authorization().await.unwrap();
+
+        assert_eq!(authorization.device_code().as_str(), "device-code");
+
+        let requests = observed_requests.lock().unwrap();
+        let request = requests.first().unwrap();
+        assert_eq!(
+            request.url,
+            "https://mesh.example/api/v1/tui/device-authorizations"
+        );
+        assert_eq!(request.body["client_name"], "meshh-tui");
+        assert_eq!(request.body["client_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            request.body["platform"],
+            format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+        );
+        assert!(
+            request
+                .body
+                .get("device_name")
+                .and_then(Value::as_str)
+                .is_some_and(|device_name| !device_name.trim().is_empty())
+        );
+    }
+
+    #[test]
     fn decodes_device_token_success_pending_denied_expired_and_invalid() {
         let approved = parse_poll_fixture(r#"{"status":"approved","access_token":"token"}"#);
         assert_eq!(
             approved,
             DeviceTokenPoll::Approved {
                 token: crate::credentials::BearerToken::new("token").unwrap()
+            }
+        );
+        assert_eq!(
+            parse_poll_fixture(
+                r#"{"token":"mesh_tui_token","token_type":"bearer","destination":{"type":"tui"}}"#
+            ),
+            DeviceTokenPoll::Approved {
+                token: crate::credentials::BearerToken::new("mesh_tui_token").unwrap()
             }
         );
         assert_eq!(
@@ -1903,6 +2070,33 @@ mod tests {
             _url: String,
             _body: Value,
         ) -> Result<HttpResponse, TransportError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ObservedPostTransport {
+        response: HttpResponse,
+        observed_requests: std::sync::Arc<std::sync::Mutex<Vec<ObservedPost>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ObservedPost {
+        url: String,
+        body: Value,
+    }
+
+    impl HttpTransport for ObservedPostTransport {
+        async fn post_json(
+            &self,
+            url: String,
+            body: Value,
+        ) -> Result<HttpResponse, TransportError> {
+            self.observed_requests
+                .lock()
+                .unwrap()
+                .push(ObservedPost { url, body });
+
             Ok(self.response.clone())
         }
     }
