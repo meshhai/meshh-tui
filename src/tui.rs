@@ -786,36 +786,48 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
 
     let rows = state.deliveries().iter().map(|item| {
         Row::new(vec![
+            Cell::from(item.detected_at().unwrap_or("-").to_owned()),
             Cell::from(item.headline().to_owned()),
             Cell::from(item.source_context().unwrap_or("-").to_owned()),
             Cell::from(item.status().as_str().to_owned()),
-            Cell::from(item.detected_at().unwrap_or("-").to_owned()),
         ])
+        .style(Style::default().fg(Color::White))
     });
     let table = Table::new(
         rows,
         [
+            Constraint::Percentage(20),
             Constraint::Percentage(44),
             Constraint::Percentage(22),
             Constraint::Percentage(14),
-            Constraint::Percentage(20),
         ],
     )
     .header(
-        Row::new(vec!["Headline", "Source", "Status", "Detected"]).style(
+        Row::new(vec!["Detected", "Headline", "Source", "Status"]).style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(Block::default().borders(Borders::ALL).title("Deliveries"))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                "Deliveries",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    )
     .column_spacing(1)
     .row_highlight_style(
         Style::default()
-            .bg(Color::Cyan)
-            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD),
-    );
+    )
+    .highlight_symbol("> ");
     let mut table_state = TableState::default().with_selected(state.selected_index());
 
     frame.render_stateful_widget(table, area, &mut table_state);

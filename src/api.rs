@@ -640,6 +640,21 @@ impl TryFrom<DeliveryListEnvelope> for DeliveryListPage {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DeliveryDetailEnvelope {
+    Item(DeliveryResponse),
+    Data { data: DeliveryResponse },
+}
+
+impl DeliveryDetailEnvelope {
+    fn into_detail(self) -> Result<DeliveryDetail, ApiError> {
+        match self {
+            Self::Item(response) | Self::Data { data: response } => response.into_detail(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct DeliveryListResponse {
     #[serde(alias = "items", alias = "data")]
     deliveries: Vec<DeliveryResponse>,
@@ -945,7 +960,7 @@ where
             )
             .await
             .map_err(|source| ApiError::Transport { source })?;
-        let response: DeliveryResponse =
+        let response: DeliveryDetailEnvelope =
             parse_authenticated_success_json(response, "loading delivery detail")?;
 
         response.into_detail()
@@ -1862,16 +1877,18 @@ mod tests {
                     HttpResponse::new(
                         200,
                         br#"{
-                        "public_delivery_id": "del_pub_01",
-                        "headline": "CPU alert routed to ops",
-                        "summary": "CPU stayed over threshold for five minutes.",
-                        "body": "The production worker pool crossed the CPU alert threshold.",
-                        "source_url": "https://alerts.example/incidents/1",
-                        "source_context": "Datadog",
-                        "status": "delivered",
-                        "detected_at": "2026-06-04T02:03:04Z",
-                        "matched_routes": ["Ops Escalation"],
-                        "cursor": "cur_01"
+                        "data": {
+                            "public_delivery_id": "del_pub_01",
+                            "headline": "CPU alert routed to ops",
+                            "summary": "CPU stayed over threshold for five minutes.",
+                            "body": "The production worker pool crossed the CPU alert threshold.",
+                            "source_url": "https://alerts.example/incidents/1",
+                            "source_context": "Datadog",
+                            "status": "delivered",
+                            "detected_at": "2026-06-04T02:03:04Z",
+                            "matched_routes": ["Ops Escalation"],
+                            "cursor": "cur_01"
+                        }
                     }"#,
                     ),
                     HttpResponse::new(
