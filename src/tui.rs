@@ -716,31 +716,16 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    let feed = match state.feed_status() {
-        FeedStatus::Loading => "loading",
-        FeedStatus::Ready => "ready",
-        FeedStatus::Empty => "empty",
-        FeedStatus::Error(error) => error.heading(),
+    let activity = header_activity(state);
+    let row_count = state.deliveries().len();
+    let rows = match row_count {
+        1 => "1 row".to_owned(),
+        count => format!("{count} rows"),
     };
-    let stream = match state.stream_status() {
-        StreamStatus::Disconnected => "disconnected".to_owned(),
-        StreamStatus::Connecting => "connecting".to_owned(),
-        StreamStatus::Live => "live".to_owned(),
-        StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
-        StreamStatus::Error(error) => error.heading().to_owned(),
+    let selected = match (state.selected_index(), row_count) {
+        (Some(index), count) if count > 0 => format!("row {}/{}", index + 1, count),
+        _other => "no row".to_owned(),
     };
-    let selected = state
-        .selected_index()
-        .map(|index| format!("row {}", index + 1))
-        .unwrap_or_else(|| "no row".to_owned());
-    let resume = state
-        .stream_resume_cursor()
-        .map(|cursor| cursor.as_str().to_owned())
-        .unwrap_or_else(|| "-".to_owned());
-    let history = state
-        .next_cursor()
-        .map(|cursor| cursor.as_str().to_owned())
-        .unwrap_or_else(|| "-".to_owned());
     let line = Line::from(vec![
         Span::styled(
             format!("meshh-tui v{}", env!("CARGO_PKG_VERSION")),
@@ -748,19 +733,30 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        Span::raw(format!("feed: {feed}")),
-        Span::raw("  "),
-        Span::raw(format!("stream: {stream}")),
-        Span::raw("  "),
-        Span::raw(format!("selected: {selected}")),
-        Span::raw("  "),
-        Span::raw(format!("resume: {resume}")),
-        Span::raw("  "),
-        Span::raw(format!("history: {history}")),
+        Span::raw(" | "),
+        Span::raw(activity),
+        Span::raw(" | "),
+        Span::raw(rows),
+        Span::raw(" | "),
+        Span::raw(selected),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn header_activity(state: &AppState) -> String {
+    match state.feed_status() {
+        FeedStatus::Loading => "loading".to_owned(),
+        FeedStatus::Error(error) => error.heading().to_owned(),
+        FeedStatus::Empty => "empty".to_owned(),
+        FeedStatus::Ready => match state.stream_status() {
+            StreamStatus::Disconnected => "offline".to_owned(),
+            StreamStatus::Connecting => "connecting".to_owned(),
+            StreamStatus::Live => "live".to_owned(),
+            StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
+            StreamStatus::Error(error) => error.heading().to_owned(),
+        },
+    }
 }
 
 fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -788,8 +784,8 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
     let rows = state.deliveries().iter().map(|item| {
         Row::new(vec![
             Cell::from(format_feed_timestamp(item.display_timestamp())),
-            Cell::from(item.headline().to_owned()),
             Cell::from(item.source_context().unwrap_or("-").to_owned()),
+            Cell::from(item.headline().to_owned()),
             Cell::from(item.status().as_str().to_owned()),
         ])
         .style(Style::default().fg(Color::White))
@@ -797,14 +793,14 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(20),
-            Constraint::Percentage(44),
-            Constraint::Percentage(22),
-            Constraint::Percentage(14),
+            Constraint::Length(12),
+            Constraint::Length(18),
+            Constraint::Min(24),
+            Constraint::Length(10),
         ],
     )
     .header(
-        Row::new(vec!["Published", "Headline", "Source", "Status"]).style(
+        Row::new(vec!["Published", "Source", "Headline", "Status"]).style(
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
@@ -1146,8 +1142,11 @@ mod tests {
         assert!(error.message().contains("stored token"));
 
         let rendered = render_text(&state);
-        assert!(rendered.contains("stream: Authentication error"));
-        assert!(rendered.contains("resume: cur_03"));
+        assert!(rendered.contains("meshh-tui v0.1.0"));
+        assert!(rendered.contains("Authentication error"));
+        assert!(rendered.contains("2 rows"));
+        assert!(!rendered.contains("resume:"));
+        assert!(!rendered.contains("cur_03"));
     }
 
     #[test]
@@ -1250,6 +1249,9 @@ mod tests {
         ));
 
         let list_text = render_text(&state);
+        assert!(list_text.contains("meshh-tui v0.1.0 | offline | 1 row | row 1/1"));
+        assert!(!list_text.contains("resume:"));
+        assert!(!list_text.contains("history:"));
         assert!(list_text.contains("CPU alert routed to ops"));
         assert!(list_text.contains("Datadog"));
         assert!(list_text.contains("delivered"));

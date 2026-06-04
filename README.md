@@ -40,12 +40,12 @@ Waiting for approval...
 Login approved. Token stored.
 
 $ meshh tui
-meshh-tui v0.1.0  feed: ready  stream: live  selected: row 1  resume: cur_live_104  history: cur_history_099
+meshh-tui v0.1.0 | live | 3 rows | row 1/3
 +------------------------------------------------------------------------------+
-|Published      Headline                         Source        Status          |
-|> Jun 04 19:09 CPU alert routed to ops          Datadog       delivered       |
-|  Jun 04 18:58 Deploy complete                  GitHub        delivered       |
-|  Jun 04 18:42 Invoice threshold matched        Stripe        delivered       |
+|Published    Source             Headline                              Status    |
+|> Jun 04 19:09 Datadog            CPU alert routed to ops               delivered |
+|  Jun 04 18:58 GitHub             Deploy complete                       delivered |
+|  Jun 04 18:42 Stripe             Invoice threshold matched             delivered |
 +------------------------------------------------------------------------------+
 up/down select | enter open | r refresh | q quit
 
