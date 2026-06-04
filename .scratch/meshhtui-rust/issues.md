@@ -1,3 +1,7 @@
+# Review notes
+
+- Tighten credential-file overwrite permissions before writing a replacement token; an existing broad file mode can expose the new bearer token until the later chmod runs.
+
 # Meshh TUI Issues
 
 ## 1. Project Foundation
@@ -121,6 +125,6 @@ Prepare the repo for a first alpha release.
 
 - [x] README includes screenshots or an asciinema-style terminal example.
 - [x] License, contribution notes, and security/reporting guidance are present.
-- [ ] CI runs the Rust feedback loop on pull requests and pushes to the repository default branch.
-- [ ] Release build works locally.
-- [x] No secrets, internal Meshh IDs, or local-only paths are committed.
+- [ ] CI runs the Rust feedback loop on pull requests and pushes to the repository default branch, including the current `master` default unless the repo is renamed before merge.
+- [ ] Release build and source-archive/package test runs work without requiring a `.git` checkout.
+- [ ] No secrets, internal Meshh IDs, local-only paths, or tracked `.scratch` planning artifacts are committed.
