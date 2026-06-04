@@ -245,6 +245,12 @@ pub fn default_credentials_path() -> Result<PathBuf, CredentialError> {
 fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+    match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(source),
+    }
+
     let mut file = fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -254,7 +260,7 @@ fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 
     file.write_all(contents)?;
     file.flush()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
 
     Ok(())
 }
@@ -302,6 +308,29 @@ mod tests {
 
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("secret-token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_tightens_existing_file_permissions_before_replacing_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_file_path("meshh-existing-credentials", "json");
+        fs::write(&path, r#"{"token":"old-token"}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let store = FileCredentialStore::new(&path);
+        let token = BearerToken::new("replacement-token").unwrap();
+
+        store.save_token(&token).unwrap();
+
+        let loaded = store.load_token().unwrap().unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(loaded.as_str(), "replacement-token");
+        assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_file(path);
     }
 
     fn temp_file_path(prefix: &str, extension: &str) -> PathBuf {

@@ -1,7 +1,3 @@
-# Review notes
-
-- Tighten credential-file overwrite permissions before writing a replacement token; an existing broad file mode can expose the new bearer token until the later chmod runs.
-
 # Meshh TUI Issues
 
 ## 1. Project Foundation
