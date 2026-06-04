@@ -1307,13 +1307,15 @@ impl HttpTransport for ReqwestTransport {
         token: BearerToken,
         mut on_chunk: impl FnMut(&[u8]) -> Result<(), TransportError> + Send,
     ) -> Result<HttpResponse, TransportError> {
-        let mut response = self
+        let send = self
             .client
             .get(url)
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .bearer_auth(token.as_str())
-            .send()
+            .send();
+        let mut response = tokio::time::timeout(self.request_timeout, send)
             .await
+            .map_err(|_source| TransportError::new("delivery stream connection timeout"))?
             .map_err(|source| {
                 TransportError::with_source("network error while sending request", source)
             })?;

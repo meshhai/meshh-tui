@@ -282,11 +282,31 @@ fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     file.flush()?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temp_path, path).inspect_err(|_source| {
-        let _ = fs::remove_file(&temp_path);
-    })?;
+    replace_secret_file(&temp_path, path)?;
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn replace_secret_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    match fs::rename(temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(first_error) if path.try_exists().unwrap_or(false) => {
+            if let Err(remove_error) = fs::remove_file(path) {
+                let _ = fs::remove_file(temp_path);
+                return Err(remove_error);
+            }
+
+            fs::rename(temp_path, path).inspect_err(|_source| {
+                let _ = fs::remove_file(temp_path);
+                let _ = first_error;
+            })
+        }
+        Err(source) => {
+            let _ = fs::remove_file(temp_path);
+            Err(source)
+        }
+    }
 }
 
 fn temporary_secret_file_path(path: &Path) -> PathBuf {
@@ -329,6 +349,25 @@ mod tests {
         store.delete_token().unwrap();
 
         assert!(store.load_token().unwrap().is_none());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn file_store_overwrites_existing_token() {
+        let path = temp_file_path("meshh-existing-credentials", "json");
+        let store = FileCredentialStore::new(&path);
+        let first_token = BearerToken::new("first-token").unwrap();
+        let second_token = BearerToken::new("second-token").unwrap();
+
+        store.save_token(&first_token).unwrap();
+        store.save_token(&second_token).unwrap();
+
+        assert_eq!(
+            store.load_token().unwrap().unwrap().as_str(),
+            "second-token"
+        );
 
         let _ = fs::remove_file(path);
     }
