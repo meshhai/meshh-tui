@@ -54,7 +54,7 @@ Implement `meshh login` against the Meshh device authorization API.
 
 ## 4. Delivery API Client
 
-Status: ready-for-agent  
+Status: completed
 Type: AFK  
 Blocked by: None
 
@@ -64,11 +64,11 @@ Implement typed API calls for delivery list, delivery detail, and stream frames.
 
 ### Acceptance criteria
 
-- [ ] List endpoint decodes public delivery items.
-- [ ] Detail endpoint decodes a selected public delivery item.
-- [ ] Stream endpoint parses server-sent delivery events and cursors.
-- [ ] Auth failures are represented distinctly from network and parse failures.
-- [ ] Tests use product-safe payload fixtures and assert no internal-ID fields are required.
+- [x] List endpoint decodes public delivery items.
+- [x] Detail endpoint decodes a selected public delivery item.
+- [x] Stream endpoint parses server-sent delivery events and cursors.
+- [x] Auth failures are represented distinctly from network and parse failures.
+- [x] Tests use product-safe payload fixtures and assert no internal-ID fields are required.
 
 ## 5. TUI List And Detail Experience
 
