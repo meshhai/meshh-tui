@@ -146,7 +146,7 @@ pub fn find_violations(
     config: &ReleaseAuditConfig,
 ) -> Result<Vec<ReleaseAuditViolation>, ReleaseAuditError> {
     let repo_root = repo_root.as_ref();
-    let tracked_files = list_tracked_files(repo_root)?;
+    let tracked_files = list_release_files(repo_root)?;
     let mut violations = Vec::new();
 
     for relative_path in tracked_files {
@@ -164,7 +164,15 @@ pub fn find_violations(
     Ok(violations)
 }
 
-fn list_tracked_files(repo_root: &Path) -> Result<Vec<PathBuf>, ReleaseAuditError> {
+fn list_release_files(repo_root: &Path) -> Result<Vec<PathBuf>, ReleaseAuditError> {
+    if repo_root.join(".git").exists() {
+        list_git_tracked_files(repo_root)
+    } else {
+        list_filesystem_release_files(repo_root)
+    }
+}
+
+fn list_git_tracked_files(repo_root: &Path) -> Result<Vec<PathBuf>, ReleaseAuditError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -196,6 +204,51 @@ fn list_tracked_files(repo_root: &Path) -> Result<Vec<PathBuf>, ReleaseAuditErro
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .collect())
+}
+
+fn list_filesystem_release_files(repo_root: &Path) -> Result<Vec<PathBuf>, ReleaseAuditError> {
+    let mut files = Vec::new();
+    collect_filesystem_release_files(repo_root, repo_root, &mut files)?;
+    files.sort();
+
+    Ok(files)
+}
+
+fn collect_filesystem_release_files(
+    repo_root: &Path,
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), ReleaseAuditError> {
+    let entries = fs::read_dir(dir).map_err(|source| ReleaseAuditError::ReadTrackedFile {
+        path: dir.strip_prefix(repo_root).unwrap_or(dir).to_owned(),
+        source,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|source| ReleaseAuditError::ReadTrackedFile {
+            path: dir.strip_prefix(repo_root).unwrap_or(dir).to_owned(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| ReleaseAuditError::ReadTrackedFile {
+                path: path.strip_prefix(repo_root).unwrap_or(&path).to_owned(),
+                source,
+            })?;
+
+        if file_type.is_dir() {
+            if matches!(entry.file_name().to_str(), Some(".git") | Some("target")) {
+                continue;
+            }
+
+            collect_filesystem_release_files(repo_root, &path, files)?;
+        } else if file_type.is_file() {
+            files.push(path.strip_prefix(repo_root).unwrap_or(&path).to_owned());
+        }
+    }
+
+    Ok(())
 }
 
 fn find_file_violations(
@@ -361,8 +414,15 @@ fn default_local_path_fragments() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseAuditConfig, ReleaseAuditViolationKind, find_file_violations};
-    use std::path::Path;
+    use super::{
+        ReleaseAuditConfig, ReleaseAuditViolationKind, find_file_violations,
+        list_filesystem_release_files,
+    };
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn internal_identifier_fields_must_be_bounded_tokens() {
@@ -403,5 +463,34 @@ mod tests {
             violations[1].kind(),
             ReleaseAuditViolationKind::LocalOnlyPath { .. }
         ));
+    }
+
+    #[test]
+    fn filesystem_release_file_listing_does_not_require_git_checkout() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("meshh-tui-release-audit-{suffix}"));
+
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        fs::create_dir_all(repo_root.join("target/debug")).unwrap();
+        fs::create_dir_all(repo_root.join(".git")).unwrap();
+        fs::write(repo_root.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(repo_root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+        fs::write(repo_root.join("target/debug/build.log"), "generated\n").unwrap();
+        fs::write(repo_root.join(".git/config"), "private git data\n").unwrap();
+
+        let files = list_filesystem_release_files(&repo_root).unwrap();
+
+        assert_eq!(
+            files,
+            vec![
+                Path::new("Cargo.toml").to_owned(),
+                Path::new("src/lib.rs").to_owned()
+            ]
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 }
