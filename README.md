@@ -27,6 +27,49 @@ The first release is planned around two commands:
 
 `meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route-feed view with headline, source, status, and detected-time columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, detected time, source context, source URL, matched routes, and summary/body text when provided.
 
+## Terminal Example
+
+The example below uses sample delivery data.
+
+```text
+$ meshh login
+Approve this terminal in Meshh:
+Verification URL: https://meshh.example/device
+User code: ABCD-EFGH
+Waiting for approval...
+Login approved. Token stored.
+
+$ meshh tui
++------------------------------------------------------------------------------+
+|MESHH ROUTE FEED  feed: ready  stream: live  selected: row 1                  |
+|resume: cur_live_104  history: cur_history_099                                |
++------------------------------------------------------------------------------+
++------------------------------------------------------------------------------+
+|Deliveries                                                                    |
+|Headline                         Source        Status       Detected           |
+|CPU alert routed to ops          Datadog       delivered    2026-06-04T02:03Z |
+|Deploy complete                  GitHub        delivered    2026-06-04T01:58Z |
+|Invoice threshold matched        Stripe        delivered    2026-06-04T01:42Z |
++------------------------------------------------------------------------------+
+up/down select | enter open | r refresh | q quit
+
+Enter
+
++------------------------------------------------------------------------------+
+|Delivery Detail                                                               |
+|CPU alert routed to ops                                                       |
+|                                                                              |
+|Status: delivered                                                             |
+|Detected: 2026-06-04T02:03:04Z                                                |
+|Source: Datadog                                                               |
+|Source URL: https://alerts.example/cpu-alert                                  |
+|Matched routes: Ops Escalation                                                |
+|                                                                              |
+|A production route matched this delivery.                                     |
++------------------------------------------------------------------------------+
+b back | r reload detail | q quit
+```
+
 ## Configuration
 
 The API base URL is resolved in this order:

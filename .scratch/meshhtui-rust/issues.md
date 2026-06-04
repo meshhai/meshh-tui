@@ -119,7 +119,7 @@ Prepare the repo for a first alpha release.
 
 ### Acceptance criteria
 
-- [ ] README includes screenshots or an asciinema-style terminal example.
+- [x] README includes screenshots or an asciinema-style terminal example.
 - [x] License, contribution notes, and security/reporting guidance are present.
 - [x] CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - [ ] Release build works locally.
