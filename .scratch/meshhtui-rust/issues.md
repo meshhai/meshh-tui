@@ -1,8 +1,3 @@
-# Review notes
-
-- Fix live delivery streaming before ordinary backlog work: stream SSE frames incrementally instead of waiting for `get_bearer` and a completed response body, so long-lived `/api/v1/destination/stream` connections update the TUI while open.
-- Keep feed selection visible for long delivery lists: add scroll state or `TableState` tied to `selected_index`, so the highlighted row and Enter target cannot move off-screen.
-
 # Meshh TUI Issues
 
 ## 1. Project Foundation

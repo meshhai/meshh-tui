@@ -725,7 +725,8 @@ pub trait DeliveryApi {
         &self,
         token: &BearerToken,
         after: Option<&StreamCursor>,
-    ) -> impl Future<Output = Result<Vec<DeliveryStreamFrame>, ApiError>> + Send;
+        on_frame: impl FnMut(DeliveryStreamFrame) -> Result<(), ApiError> + Send,
+    ) -> impl Future<Output = Result<(), ApiError>> + Send;
 }
 
 /// Configuration needed by Meshh API clients.
@@ -892,15 +893,50 @@ where
         &self,
         token: &BearerToken,
         after: Option<&StreamCursor>,
-    ) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
+        mut on_frame: impl FnMut(DeliveryStreamFrame) -> Result<(), ApiError> + Send,
+    ) -> Result<(), ApiError> {
+        let mut parser = DeliveryStreamParser::default();
+        let mut stream_error = None;
         let response = self
             .transport
-            .get_bearer(self.delivery_stream_endpoint(after)?, token.clone())
-            .await
-            .map_err(|source| ApiError::Transport { source })?;
-        let response = parse_authenticated_success_body(response, "streaming deliveries")?;
+            .get_bearer_stream(
+                self.delivery_stream_endpoint(after)?,
+                token.clone(),
+                |chunk| {
+                    let frames = match parser.push_chunk(chunk) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            stream_error = Some(error);
+                            return Err(TransportError::new("invalid delivery stream response"));
+                        }
+                    };
 
-        parse_delivery_stream_frames(&response)
+                    for frame in frames {
+                        if let Err(error) = on_frame(frame) {
+                            stream_error = Some(error);
+                            return Err(TransportError::new(
+                                "delivery stream frame handler failed",
+                            ));
+                        }
+                    }
+
+                    Ok(())
+                },
+            )
+            .await;
+
+        if let Some(error) = stream_error {
+            return Err(error);
+        }
+
+        let response = response.map_err(|source| ApiError::Transport { source })?;
+        parse_authenticated_success_body(response, "streaming deliveries")?;
+
+        for frame in parser.finish()? {
+            on_frame(frame)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -923,6 +959,28 @@ pub trait HttpTransport {
             Err(TransportError::new(
                 "authenticated GET is not supported by this transport",
             ))
+        }
+    }
+
+    fn get_bearer_stream(
+        &self,
+        url: String,
+        token: BearerToken,
+        mut on_chunk: impl FnMut(&[u8]) -> Result<(), TransportError> + Send,
+    ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            let response = self.get_bearer(url, token).await?;
+
+            if (200..300).contains(&response.status()) && !response.body().is_empty() {
+                on_chunk(response.body())?;
+
+                return Ok(HttpResponse::new(response.status(), Vec::new()));
+            }
+
+            Ok(response)
         }
     }
 }
@@ -1018,6 +1076,43 @@ impl HttpTransport for ReqwestTransport {
         })?;
 
         Ok(HttpResponse::new(status, body.to_vec()))
+    }
+
+    async fn get_bearer_stream(
+        &self,
+        url: String,
+        token: BearerToken,
+        mut on_chunk: impl FnMut(&[u8]) -> Result<(), TransportError> + Send,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut response = self
+            .client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .bearer_auth(token.as_str())
+            .send()
+            .await
+            .map_err(|source| {
+                TransportError::with_source("network error while sending request", source)
+            })?;
+        let status = response.status().as_u16();
+
+        if !(200..300).contains(&status) {
+            let body = response.bytes().await.map_err(|source| {
+                TransportError::with_source("network error while reading response body", source)
+            })?;
+
+            return Ok(HttpResponse::new(status, body.to_vec()));
+        }
+
+        while let Some(chunk) = response.chunk().await.map_err(|source| {
+            TransportError::with_source("network error while reading response body", source)
+        })? {
+            if !chunk.is_empty() {
+                on_chunk(&chunk)?;
+            }
+        }
+
+        Ok(HttpResponse::new(status, Vec::new()))
     }
 }
 
@@ -1121,41 +1216,62 @@ fn non_empty_optional(value: Option<String>) -> Option<String> {
 
 /// Parses server-sent events returned by the delivery stream endpoint.
 pub fn parse_delivery_stream_frames(body: &[u8]) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
-    let text = std::str::from_utf8(body).map_err(|source| ApiError::InvalidResponse {
-        message: format!("delivery stream response was not UTF-8: {source}"),
-    })?;
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut parser = DeliveryStreamParser::default();
     let mut frames = Vec::new();
 
-    for message in parse_sse_messages(&normalized) {
-        let event = message.event.as_deref().unwrap_or("message");
-
-        if message.data.trim().is_empty() {
-            continue;
-        }
-
-        match event {
-            "cursor" => {
-                frames.push(DeliveryStreamFrame::Cursor(parse_cursor_event_data(
-                    &message.data,
-                )?));
-            }
-            "delivery" | "message" => {
-                frames.push(parse_delivery_stream_frame(message)?);
-            }
-            "heartbeat" | "ping" => {}
-            _ => {
-                return Err(ApiError::InvalidResponse {
-                    message: format!(
-                        "delivery stream response had an unsupported event `{}`",
-                        clipped(event)
-                    ),
-                });
-            }
-        }
-    }
+    frames.extend(parser.push_chunk(body)?);
+    frames.extend(parser.finish()?);
 
     Ok(frames)
+}
+
+#[derive(Debug, Default)]
+struct DeliveryStreamParser {
+    buffer: Vec<u8>,
+}
+
+impl DeliveryStreamParser {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
+        self.buffer.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+
+        while let Some((index, separator_len)) = next_sse_message_separator(&self.buffer) {
+            let block = self.buffer[..index].to_vec();
+            self.buffer.drain(..index + separator_len);
+
+            if let Some(frame) = parse_sse_message_bytes(&block)? {
+                frames.push(frame);
+            }
+        }
+
+        Ok(frames)
+    }
+
+    fn finish(&mut self) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
+        if self.buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let block = self.buffer.split_off(0);
+
+        Ok(parse_sse_message_bytes(&block)?.into_iter().collect())
+    }
+}
+
+fn next_sse_message_separator(buffer: &[u8]) -> Option<(usize, usize)> {
+    [
+        b"\r\n\r\n".as_slice(),
+        b"\n\n".as_slice(),
+        b"\r\r".as_slice(),
+    ]
+    .into_iter()
+    .filter_map(|separator| {
+        buffer
+            .windows(separator.len())
+            .position(|window| window == separator)
+            .map(|index| (index, separator.len()))
+    })
+    .min_by_key(|(index, _)| *index)
 }
 
 #[derive(Debug)]
@@ -1165,42 +1281,67 @@ struct SseMessage {
     data: String,
 }
 
-fn parse_sse_messages(text: &str) -> Vec<SseMessage> {
-    text.split("\n\n")
-        .filter_map(|block| {
-            let mut event = None;
-            let mut id = None;
-            let mut data = String::new();
+fn parse_sse_message_bytes(block: &[u8]) -> Result<Option<DeliveryStreamFrame>, ApiError> {
+    let text = std::str::from_utf8(block).map_err(|source| ApiError::InvalidResponse {
+        message: format!("delivery stream response was not UTF-8: {source}"),
+    })?;
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let Some(message) = parse_sse_message_block(&normalized) else {
+        return Ok(None);
+    };
+    let event = message.event.as_deref().unwrap_or("message").to_owned();
 
-            for line in block.lines() {
-                if line.starts_with(':') {
-                    continue;
+    if message.data.trim().is_empty() {
+        return Ok(None);
+    }
+
+    match event.as_str() {
+        "cursor" => Ok(Some(DeliveryStreamFrame::Cursor(parse_cursor_event_data(
+            &message.data,
+        )?))),
+        "delivery" | "message" => Ok(Some(parse_delivery_stream_frame(message)?)),
+        "heartbeat" | "ping" => Ok(None),
+        _ => Err(ApiError::InvalidResponse {
+            message: format!(
+                "delivery stream response had an unsupported event `{}`",
+                clipped(&event)
+            ),
+        }),
+    }
+}
+
+fn parse_sse_message_block(block: &str) -> Option<SseMessage> {
+    let mut event = None;
+    let mut id = None;
+    let mut data = String::new();
+
+    for line in block.lines() {
+        if line.starts_with(':') {
+            continue;
+        }
+
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+
+        match field {
+            "event" if !value.trim().is_empty() => event = Some(value.to_owned()),
+            "id" if !value.trim().is_empty() => id = Some(value.to_owned()),
+            "data" => {
+                if !data.is_empty() {
+                    data.push('\n');
                 }
 
-                let (field, value) = line.split_once(':').unwrap_or((line, ""));
-                let value = value.strip_prefix(' ').unwrap_or(value);
-
-                match field {
-                    "event" if !value.trim().is_empty() => event = Some(value.to_owned()),
-                    "id" if !value.trim().is_empty() => id = Some(value.to_owned()),
-                    "data" => {
-                        if !data.is_empty() {
-                            data.push('\n');
-                        }
-
-                        data.push_str(value);
-                    }
-                    _ => {}
-                }
+                data.push_str(value);
             }
+            _ => {}
+        }
+    }
 
-            if event.is_none() && id.is_none() && data.is_empty() {
-                None
-            } else {
-                Some(SseMessage { event, id, data })
-            }
-        })
-        .collect()
+    if event.is_none() && id.is_none() && data.is_empty() {
+        None
+    } else {
+        Some(SseMessage { event, id, data })
+    }
 }
 
 fn parse_cursor_event_data(data: &str) -> Result<StreamCursor, ApiError> {
@@ -1381,7 +1522,7 @@ impl Error for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::mpsc, time::Duration};
 
     use serde_json::Value;
 
@@ -1604,8 +1745,17 @@ mod tests {
         );
         assert_eq!(detail.matched_routes()[0].name(), "Ops Escalation");
 
-        let frames = client
-            .stream_deliveries(&token, Some(&StreamCursor::new("cur_01").unwrap()))
+        let mut frames = Vec::new();
+        client
+            .stream_deliveries(
+                &token,
+                Some(&StreamCursor::new("cur_01").unwrap()),
+                |frame| {
+                    frames.push(frame);
+
+                    Ok(())
+                },
+            )
             .await
             .unwrap();
 
@@ -1666,6 +1816,62 @@ mod tests {
         };
         assert_eq!(cursor.as_ref().map(StreamCursor::as_str), Some("cur_03"));
         assert_eq!(item.public_delivery_id().as_str(), "del_pub_03");
+    }
+
+    #[test]
+    fn parses_delivery_stream_frames_incrementally_across_chunks() {
+        let mut parser = super::DeliveryStreamParser::default();
+
+        assert!(parser.push_chunk(b"event: delivery\n").unwrap().is_empty());
+        assert!(
+            parser
+                .push_chunk(
+                    b"data: {\"public_delivery_id\":\"del_pub_04\",\"headline\":\"Partial event\","
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let frames = parser
+            .push_chunk(b"\"status\":\"delivered\"}\n\nevent: cursor\r\ndata: cur_05\r\n\r\n")
+            .unwrap();
+
+        let DeliveryStreamFrame::Delivery { item, .. } = &frames[0] else {
+            panic!("expected streamed delivery frame");
+        };
+        assert_eq!(item.public_delivery_id().as_str(), "del_pub_04");
+        assert_eq!(
+            frames[1],
+            DeliveryStreamFrame::Cursor(StreamCursor::new("cur_05").unwrap())
+        );
+        assert!(parser.finish().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_api_emits_stream_frames_before_response_completes() {
+        let client = ApiClient::with_transport(
+            ApiClientConfig::new("https://mesh.example").unwrap(),
+            HangingStreamTransport,
+        );
+        let token = crate::credentials::BearerToken::new("destination-token").unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        let handle = tokio::spawn(async move {
+            client
+                .stream_deliveries(&token, None, move |frame| {
+                    sender.send(frame).map_err(|_| ApiError::InvalidResponse {
+                        message: "test stream receiver closed".to_owned(),
+                    })
+                })
+                .await
+        });
+
+        let frame = recv_delivery_stream_frame(&receiver).await;
+        let DeliveryStreamFrame::Delivery { item, .. } = frame else {
+            panic!("expected streamed delivery frame");
+        };
+        assert_eq!(item.public_delivery_id().as_str(), "del_pub_live");
+        assert!(!handle.is_finished());
+        handle.abort();
     }
 
     fn parse_poll_fixture(json: &str) -> DeviceTokenPoll {
@@ -1751,5 +1957,51 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| TransportError::new("unexpected delivery API request"))
         }
+    }
+
+    #[derive(Debug)]
+    struct HangingStreamTransport;
+
+    impl HttpTransport for HangingStreamTransport {
+        async fn post_json(
+            &self,
+            _url: String,
+            _body: Value,
+        ) -> Result<HttpResponse, TransportError> {
+            panic!("delivery stream API should not use POST requests")
+        }
+
+        async fn get_bearer_stream(
+            &self,
+            _url: String,
+            _token: crate::credentials::BearerToken,
+            mut on_chunk: impl FnMut(&[u8]) -> Result<(), TransportError> + Send,
+        ) -> Result<HttpResponse, TransportError> {
+            on_chunk(
+                b"event: delivery\ndata: {\"public_delivery_id\":\"del_pub_live\",\"headline\":\"Live delivery\",\"status\":\"delivered\"}\n\n",
+            )?;
+
+            std::future::pending::<Result<HttpResponse, TransportError>>().await
+        }
+    }
+
+    async fn recv_delivery_stream_frame(
+        receiver: &mpsc::Receiver<DeliveryStreamFrame>,
+    ) -> DeliveryStreamFrame {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match receiver.try_recv() {
+                    Ok(frame) => return frame,
+                    Err(mpsc::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        panic!("stream disconnected before sending a frame")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("stream frame")
     }
 }

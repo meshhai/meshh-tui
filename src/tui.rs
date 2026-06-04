@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use crate::{
@@ -547,20 +547,37 @@ where
         let mut after = initial_after;
 
         loop {
-            match api.stream_deliveries(&token, after.as_ref()).await {
-                Ok(frames) => {
-                    if let Some(cursor) = latest_stream_cursor(&frames) {
-                        after = Some(cursor);
+            let frame_sender = sender.clone();
+            let mut next_after = after.clone();
+            let mut received_frame = false;
+            let stream_after = after.clone();
+            let result = api
+                .stream_deliveries(&token, stream_after.as_ref(), |frame| {
+                    if let Some(cursor) = frame_cursor(&frame) {
+                        next_after = Some(cursor);
                     }
+                    received_frame = true;
 
-                    let received_empty_batch = frames.is_empty();
-                    if sender.send(StreamWorkerMessage::Frames(frames)).is_err() {
+                    frame_sender
+                        .send(StreamWorkerMessage::Frames(vec![frame]))
+                        .map_err(|_| ApiError::InvalidResponse {
+                            message: "delivery stream receiver closed".to_owned(),
+                        })
+                })
+                .await;
+            after = next_after;
+
+            match result {
+                Ok(()) => {
+                    if !received_frame
+                        && sender
+                            .send(StreamWorkerMessage::Frames(Vec::new()))
+                            .is_err()
+                    {
                         break;
                     }
 
-                    if received_empty_batch {
-                        tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
-                    }
+                    tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
                 }
                 Err(error) => {
                     let is_authentication_error = matches!(error, ApiError::Authentication { .. });
@@ -589,10 +606,6 @@ fn drain_stream_events(state: &mut AppState, stream_events: &mpsc::Receiver<Stre
             StreamWorkerMessage::Error(error) => state.receive_stream_error(&error),
         }
     }
-}
-
-fn latest_stream_cursor(frames: &[DeliveryStreamFrame]) -> Option<StreamCursor> {
-    frames.iter().filter_map(frame_cursor).next_back()
 }
 
 fn frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
@@ -769,23 +782,13 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
         return;
     }
 
-    let rows = state.deliveries().iter().enumerate().map(|(index, item)| {
-        let style = if state.selected_index() == Some(index) {
-            Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-
+    let rows = state.deliveries().iter().map(|item| {
         Row::new(vec![
             Cell::from(item.headline().to_owned()),
             Cell::from(item.source_context().unwrap_or("-").to_owned()),
             Cell::from(item.status().as_str().to_owned()),
             Cell::from(item.detected_at().unwrap_or("-").to_owned()),
         ])
-        .style(style)
     });
     let table = Table::new(
         rows,
@@ -804,9 +807,16 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
         ),
     )
     .block(Block::default().borders(Borders::ALL).title("Deliveries"))
-    .column_spacing(1);
+    .column_spacing(1)
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::Cyan)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut table_state = TableState::default().with_selected(state.selected_index());
 
-    frame.render_widget(table, area);
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -1180,6 +1190,28 @@ mod tests {
         assert!(detail_text.contains("Ops Escalation"));
     }
 
+    #[test]
+    fn render_keeps_selected_row_visible_in_long_lists() {
+        let mut state = AppState::default();
+        let deliveries = (0..30)
+            .map(|index| {
+                let public_delivery_id = format!("del_pub_{index:02}");
+                let headline = format!("Delivery {index:02}");
+
+                delivery(&public_delivery_id, &headline, None)
+            })
+            .collect();
+        state.receive_delivery_page(DeliveryListPage::new(deliveries, None));
+
+        for _ in 0..18 {
+            state.select_next();
+        }
+
+        assert_eq!(state.selected_index(), Some(18));
+        let list_text = render_text_with_size(&state, 120, 12);
+        assert!(list_text.contains("Delivery 18"), "rendered:\n{list_text}");
+    }
+
     fn delivery(
         public_delivery_id: &str,
         headline: &str,
@@ -1222,7 +1254,11 @@ mod tests {
     }
 
     fn render_text(state: &AppState) -> String {
-        let backend = TestBackend::new(120, 24);
+        render_text_with_size(state, 120, 24)
+    }
+
+    fn render_text_with_size(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| super::render(frame, state)).unwrap();
@@ -1301,7 +1337,8 @@ mod tests {
             &self,
             _token: &BearerToken,
             after: Option<&StreamCursor>,
-        ) -> Result<Vec<DeliveryStreamFrame>, ApiError> {
+            mut on_frame: impl FnMut(DeliveryStreamFrame) -> Result<(), ApiError> + Send,
+        ) -> Result<(), ApiError> {
             self.observed_after_values
                 .lock()
                 .unwrap()
@@ -1314,7 +1351,13 @@ mod tests {
                 .pop_front()
                 .expect("scripted stream response")
             {
-                StreamResponse::Frames(frames) => Ok(frames),
+                StreamResponse::Frames(frames) => {
+                    for frame in frames {
+                        on_frame(frame)?;
+                    }
+
+                    Ok(())
+                }
                 StreamResponse::AuthError => Err(ApiError::Authentication {
                     operation: "streaming deliveries",
                     status: 401,
