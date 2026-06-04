@@ -9,6 +9,7 @@ use crate::credentials::BearerToken;
 const DEVICE_AUTHORIZATION_PATH: &str = "/api/v1/tui/device-authorizations";
 const DEVICE_TOKEN_PATH: &str = "/api/v1/tui/device-tokens";
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Opaque code used to poll for a device authorization result.
 #[derive(Clone, PartialEq, Eq)]
@@ -350,9 +351,8 @@ where
             .post_json(url, json!({ "device_code": device_code }))
             .await
             .map_err(|source| ApiError::Transport { source })?;
-        let response: DeviceTokenResponse = parse_success_json(response, "polling a device token")?;
 
-        response.into_poll()
+        parse_device_token_poll_response(response)
     }
 }
 
@@ -396,6 +396,7 @@ impl HttpResponse {
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    request_timeout: Duration,
 }
 
 impl ReqwestTransport {
@@ -403,6 +404,7 @@ impl ReqwestTransport {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 }
@@ -418,6 +420,7 @@ impl HttpTransport for ReqwestTransport {
         let response = self
             .client
             .post(url)
+            .timeout(self.request_timeout)
             .json(&body)
             .send()
             .await
@@ -438,16 +441,52 @@ where
     T: DeserializeOwned,
 {
     if !(200..300).contains(&response.status()) {
-        return Err(ApiError::HttpStatus {
-            operation,
-            status: response.status(),
-            body: clipped(&String::from_utf8_lossy(response.body())),
-        });
+        return Err(http_status_error(&response, operation));
     }
 
+    parse_json_body(&response, operation)
+}
+
+fn parse_device_token_poll_response(response: HttpResponse) -> Result<DeviceTokenPoll, ApiError> {
+    const OPERATION: &str = "polling a device token";
+
+    if (200..300).contains(&response.status()) {
+        let response: DeviceTokenResponse = parse_json_body(&response, OPERATION)?;
+
+        return response.into_poll();
+    }
+
+    if (400..500).contains(&response.status())
+        && let Ok(response_body) = serde_json::from_slice::<DeviceTokenResponse>(response.body())
+        && let Ok(poll) = response_body.into_poll()
+    {
+        match &poll {
+            DeviceTokenPoll::Pending
+            | DeviceTokenPoll::Denied
+            | DeviceTokenPoll::Expired
+            | DeviceTokenPoll::InvalidDeviceCode => return Ok(poll),
+            DeviceTokenPoll::Approved { .. } => {}
+        }
+    }
+
+    Err(http_status_error(&response, OPERATION))
+}
+
+fn parse_json_body<T>(response: &HttpResponse, operation: &'static str) -> Result<T, ApiError>
+where
+    T: DeserializeOwned,
+{
     serde_json::from_slice(response.body()).map_err(|source| ApiError::InvalidResponse {
         message: format!("could not decode Meshh API response while {operation}: {source}"),
     })
+}
+
+fn http_status_error(response: &HttpResponse, operation: &'static str) -> ApiError {
+    ApiError::HttpStatus {
+        operation,
+        status: response.status(),
+        body: clipped(&String::from_utf8_lossy(response.body())),
+    }
 }
 
 fn clipped(value: &str) -> String {
@@ -546,8 +585,14 @@ impl Error for ApiError {
 mod tests {
     use std::time::Duration;
 
-    use super::{DeviceAuthorization, DeviceTokenPoll, HttpResponse, parse_success_json};
-    use crate::api::DeviceTokenResponse;
+    use serde_json::Value;
+
+    use super::{
+        ApiClient, ApiClientConfig, DeviceAuthorization, DeviceLoginApi, DeviceTokenPoll,
+        HttpResponse, HttpTransport, ReqwestTransport, TransportError,
+        parse_device_token_poll_response, parse_success_json,
+    };
+    use crate::api::{DeviceCode, DeviceTokenResponse};
 
     #[test]
     fn decodes_device_authorization_response() {
@@ -621,6 +666,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn maps_device_token_protocol_error_bodies_from_http_4xx() {
+        let cases = [
+            (
+                400,
+                r#"{"error":"authorization_pending"}"#,
+                DeviceTokenPoll::Pending,
+            ),
+            (403, r#"{"error":"access_denied"}"#, DeviceTokenPoll::Denied),
+            (
+                400,
+                r#"{"error":"expired_token"}"#,
+                DeviceTokenPoll::Expired,
+            ),
+            (
+                400,
+                r#"{"error":"invalid_device_code"}"#,
+                DeviceTokenPoll::InvalidDeviceCode,
+            ),
+        ];
+
+        for (status, body, expected) in cases {
+            let poll = parse_device_token_poll_response(HttpResponse::new(status, body.as_bytes()))
+                .unwrap();
+
+            assert_eq!(poll, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_device_token_maps_http_4xx_protocol_error_body() {
+        let client = ApiClient::with_transport(
+            ApiClientConfig::new("https://mesh.example").unwrap(),
+            StaticTransport {
+                response: HttpResponse::new(403, br#"{"error":"access_denied"}"#),
+            },
+        );
+
+        let poll = client
+            .poll_device_token(&DeviceCode::new("device-code").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(poll, DeviceTokenPoll::Denied);
+    }
+
+    #[test]
+    fn reqwest_transport_uses_finite_request_timeout() {
+        let transport = ReqwestTransport::new();
+
+        assert_eq!(transport.request_timeout, Duration::from_secs(30));
+        assert!(!transport.request_timeout.is_zero());
+    }
+
     fn parse_poll_fixture(json: &str) -> DeviceTokenPoll {
         let response: DeviceTokenResponse = parse_success_json(
             HttpResponse::new(200, json.as_bytes()),
@@ -629,5 +728,20 @@ mod tests {
         .unwrap();
 
         response.into_poll().unwrap()
+    }
+
+    #[derive(Debug)]
+    struct StaticTransport {
+        response: HttpResponse,
+    }
+
+    impl HttpTransport for StaticTransport {
+        async fn post_json(
+            &self,
+            _url: String,
+            _body: Value,
+        ) -> Result<HttpResponse, TransportError> {
+            Ok(self.response.clone())
+        }
     }
 }

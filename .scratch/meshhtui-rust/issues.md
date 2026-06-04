@@ -1,9 +1,3 @@
-# Review notes
-
-- Fix config loading so CLI `--api-base-url` and `MESHH_API_BASE_URL` are resolved before reading or parsing the config file; higher-precedence overrides should recover from malformed or unreadable lower-precedence config.
-- Fix device-token polling to map protocol error bodies such as `authorization_pending`, `access_denied`, `expired_token`, and invalid-device-code responses even when the token endpoint returns HTTP 4xx.
-- Add a finite reqwest request timeout for login authorization and polling so stalled connections surface as clear terminal errors instead of hanging indefinitely.
-
 # Meshh TUI Issues
 
 ## 1. Project Foundation

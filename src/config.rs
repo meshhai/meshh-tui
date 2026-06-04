@@ -41,28 +41,30 @@ impl RuntimeConfig {
 
     /// Loads runtime configuration using explicit loading options.
     pub fn load_from(options: ConfigLoadOptions) -> Result<Self, ConfigError> {
-        let config_path = match options.config_path {
+        let ConfigLoadOptions {
+            cli_api_base_url,
+            config_path,
+        } = options;
+
+        if let Some(cli_api_base_url) = cli_api_base_url {
+            return Self::resolve(
+                ConfigSources::default().with_cli_api_base_url(Some(cli_api_base_url)),
+            );
+        }
+
+        if let Some(env_api_base_url) = read_env_api_base_url()? {
+            return Self::resolve(
+                ConfigSources::default().with_env_api_base_url(Some(env_api_base_url)),
+            );
+        }
+
+        let config_path = match config_path {
             Some(path) => path,
             None => default_config_path()?,
         };
         let config_file = FileConfig::read_optional(config_path)?;
 
-        let env_api_base_url = match env::var(ENV_API_BASE_URL) {
-            Ok(value) => Some(value),
-            Err(env::VarError::NotPresent) => None,
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(ConfigError::NonUnicodeEnvironmentVariable {
-                    name: ENV_API_BASE_URL,
-                });
-            }
-        };
-
-        Self::resolve(
-            ConfigSources::default()
-                .with_cli_api_base_url(options.cli_api_base_url)
-                .with_env_api_base_url(env_api_base_url)
-                .with_config_file(config_file),
-        )
+        Self::resolve(ConfigSources::default().with_config_file(config_file))
     }
 
     /// Resolves runtime configuration from already-collected sources.
@@ -319,18 +321,33 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn read_env_api_base_url() -> Result<Option<String>, ConfigError> {
+    match env::var(ENV_API_BASE_URL) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::NonUnicodeEnvironmentVariable {
+            name: ENV_API_BASE_URL,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        env,
+        ffi::OsString,
         fs,
         path::PathBuf,
+        sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        ApiBaseUrlSource, ConfigError, ConfigSources, DEFAULT_API_BASE_URL, FileConfig,
-        RuntimeConfig,
+        ApiBaseUrlSource, ConfigError, ConfigLoadOptions, ConfigSources, DEFAULT_API_BASE_URL,
+        ENV_API_BASE_URL, FileConfig, RuntimeConfig,
     };
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn api_base_url_precedence_is_cli_env_config_file_default() {
@@ -405,6 +422,39 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn cli_api_base_url_wins_without_parsing_malformed_config_file() {
+        let path = temp_file_path("meshh-config-malformed", "json");
+        fs::write(&path, "{not-json").unwrap();
+
+        let config = RuntimeConfig::load_from(
+            ConfigLoadOptions::new(Some("https://cli.example".to_owned())).with_config_path(&path),
+        )
+        .unwrap();
+
+        assert_eq!(config.api_base_url(), "https://cli.example");
+        assert_eq!(config.api_base_url_source(), ApiBaseUrlSource::Cli);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn env_api_base_url_wins_without_parsing_malformed_config_file() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let path = temp_file_path("meshh-config-malformed", "json");
+        fs::write(&path, "{not-json").unwrap();
+        let previous = set_api_base_url_env("https://env.example");
+
+        let result = RuntimeConfig::load_from(ConfigLoadOptions::new(None).with_config_path(&path));
+
+        restore_api_base_url_env(previous);
+        fs::remove_file(path).unwrap();
+
+        let config = result.unwrap();
+        assert_eq!(config.api_base_url(), "https://env.example");
+        assert_eq!(config.api_base_url_source(), ApiBaseUrlSource::Environment);
+    }
+
     fn temp_file_path(prefix: &str, extension: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -412,5 +462,29 @@ mod tests {
             .as_nanos();
 
         std::env::temp_dir().join(format!("{prefix}-{}.{extension}", unique))
+    }
+
+    fn set_api_base_url_env(value: &str) -> Option<OsString> {
+        let previous = env::var_os(ENV_API_BASE_URL);
+
+        // SAFETY: this test module serializes process-environment mutation with ENV_MUTEX and
+        // restores the original value before releasing the lock.
+        unsafe {
+            env::set_var(ENV_API_BASE_URL, value);
+        }
+
+        previous
+    }
+
+    fn restore_api_base_url_env(previous: Option<OsString>) {
+        // SAFETY: this test module serializes process-environment mutation with ENV_MUTEX and
+        // restores the original value before releasing the lock.
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var(ENV_API_BASE_URL, value);
+            } else {
+                env::remove_var(ENV_API_BASE_URL);
+            }
+        }
     }
 }
