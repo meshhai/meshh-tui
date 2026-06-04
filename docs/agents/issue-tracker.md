@@ -1,39 +1,21 @@
-# Issue Tracker
+# Planning And Issues
 
-Implementation planning for agent-driven work is feature-scoped local markdown, not GitHub Issues.
+Public coordination for `meshh-tui` should happen through GitHub Issues, PRs, and tracked docs.
 
-## Canonical Files
+## GitHub Issues
 
-Each feature uses this local layout:
+- Use GitHub Issues for public bug reports, feature requests, and maintainer-approved implementation tasks.
+- Keep issue titles user-facing and concrete.
+- Prefer small, independently shippable issues over broad umbrella tasks.
+- Apply the triage labels in `triage-labels.md` when labels are available.
 
-```text
-.scratch/<feature>/
-├── prd.md
-├── issues.md
-└── progress.txt
-```
+## Implementation Plans
 
-- `.scratch/<feature>/prd.md` contains product requirements, scope, user stories, and acceptance criteria.
-- `.scratch/<feature>/issues.md` contains implementation slices, task status, and optional top-of-file `# Review notes`.
-- `.scratch/<feature>/progress.txt` is an append-only iteration log.
-- `.scratch/<feature>/PRD.md` may be accepted by local tooling as a compatibility alias for `prd.md`.
-
-## Scratch State
-
-- `.scratch/` is local planning scratch and should stay out of public commits by default.
-- `.agents/` is local executable skill configuration and should stay out of public commits by default.
-- Do not treat scratch output as durable project truth. Promote durable vocabulary to `CONTEXT.md`, durable decisions to `docs/adr/`, and public workflow policy to `docs/agents/`.
-
-## GitHub
-
-Use GitHub for pull requests and code review, not as the canonical implementation task queue.
-
-- Target PRs at `main` unless the user explicitly says otherwise.
-- Include the relevant local feature slug or planning summary in the PR body when helpful.
-- Do not push branches unless the user asks.
+- Put reviewable implementation context in the PR body.
+- Add durable architecture decisions to `docs/adr/`.
+- Add stable user-facing or contributor-facing behavior to `README.md` or tracked docs.
+- Keep private local notes out of public commits.
 
 ## When A Skill Says "Issue Tracker"
 
-For agent-driven implementation work, read and update `.scratch/<feature>/issues.md`. Use the sibling `prd.md` and `progress.txt` for context.
-
-For PR publication or review coordination, use GitHub PRs.
+Use the public GitHub issue or PR thread when one exists. If the work is not yet public, use the current user request and any provided planning documents as the source of truth, then promote only stable decisions into tracked docs.

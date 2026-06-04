@@ -11,11 +11,11 @@ How contributors and coding agents should plan, publish, and verify `meshh-tui` 
 - Do not amend pushed commits unless the user explicitly asks.
 - Push only when the user asks.
 
-## Local Planning
+## Planning
 
-- Use `.scratch/<feature>/prd.md`, `.scratch/<feature>/issues.md`, and `.scratch/<feature>/progress.txt` for local agent-driven planning.
-- Keep `.scratch/` and `.agents/` out of public commits by default.
-- Promote durable product language to `CONTEXT.md`.
+- Keep private local notes out of public commits.
+- Put reviewable implementation context in the PR body.
+- Promote durable product language to `README.md` or `CONTEXT.md`.
 - Promote durable architecture decisions to `docs/adr/`.
 - Promote public workflow policy to `docs/agents/`.
 

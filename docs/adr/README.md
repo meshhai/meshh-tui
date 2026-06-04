@@ -10,4 +10,4 @@ ADRs should be short and concrete:
 - decision
 - consequences
 
-Do not put transient implementation plans here. Use `.scratch/<feature>/` for local planning and promote only durable decisions into ADRs.
+Do not put transient implementation plans here. Put reviewable implementation context in PR descriptions and promote only durable decisions into ADRs.

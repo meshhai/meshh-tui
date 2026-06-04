@@ -2,12 +2,12 @@
 
 These files describe how contributors and coding agents should work in this repository.
 
-They are public repo policy, not executable agent prompts. Local executable skills can live under `.agents/skills/`, but `.agents/` is intentionally ignored.
+They are public repo policy, not executable agent prompts or private planning state.
 
 ## Files
 
-- `issue-tracker.md` explains the local planning-file convention.
-- `triage-labels.md` defines status names used in local issue files.
+- `issue-tracker.md` explains how public issues and implementation plans should be handled.
+- `triage-labels.md` defines issue triage labels and their meaning.
 - `domain.md` explains which product and architecture docs to read.
 - `pr-lifecycle.md` explains branch, PR, verification, and release flow.
 

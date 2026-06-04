@@ -10,7 +10,7 @@ Read these first when they exist:
 - `README.md` for public installation, usage, and development guidance.
 - `CONTEXT.md` for stable Meshh TUI vocabulary and architecture rules.
 - `docs/adr/` for accepted architecture decisions that touch the area being changed.
-- `.scratch/<feature>/prd.md` and `.scratch/<feature>/issues.md` for local feature planning.
+- The current GitHub issue, PR, or user-provided planning docs for feature-specific scope.
 
 If a future `CONTEXT-MAP.md` exists, follow it as the source of context boundaries.
 
