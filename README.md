@@ -40,16 +40,12 @@ Waiting for approval...
 Login approved. Token stored.
 
 $ meshh tui
+meshh-tui v0.1.0  feed: ready  stream: live  selected: row 1  resume: cur_live_104  history: cur_history_099
 +------------------------------------------------------------------------------+
-|MESHH ROUTE FEED  feed: ready  stream: live  selected: row 1                  |
-|resume: cur_live_104  history: cur_history_099                                |
-+------------------------------------------------------------------------------+
-+------------------------------------------------------------------------------+
-|Deliveries                                                                    |
-|Headline                         Source        Status       Detected           |
-|CPU alert routed to ops          Datadog       delivered    2026-06-04T02:03Z |
-|Deploy complete                  GitHub        delivered    2026-06-04T01:58Z |
-|Invoice threshold matched        Stripe        delivered    2026-06-04T01:42Z |
+|Published      Headline                         Source        Status          |
+|> Jun 04 19:09 CPU alert routed to ops          Datadog       delivered       |
+|  Jun 04 18:58 Deploy complete                  GitHub        delivered       |
+|  Jun 04 18:42 Invoice threshold matched        Stripe        delivered       |
 +------------------------------------------------------------------------------+
 up/down select | enter open | r refresh | q quit
 
@@ -60,7 +56,7 @@ Enter
 |CPU alert routed to ops                                                       |
 |                                                                              |
 |Status: delivered                                                             |
-|Detected: 2026-06-04T02:03:04Z                                                |
+|Published: Jun 04 19:09                                                       |
 |Source: Datadog                                                               |
 |Source URL: https://alerts.example/cpu-alert                                  |
 |Matched routes: Ops Escalation                                                |

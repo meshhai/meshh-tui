@@ -437,6 +437,7 @@ pub struct DeliveryListItem {
     headline: String,
     source_context: Option<String>,
     status: DeliveryStatus,
+    published_at: Option<String>,
     detected_at: Option<String>,
     cursor: Option<StreamCursor>,
 }
@@ -448,6 +449,7 @@ impl DeliveryListItem {
         headline: impl Into<String>,
         source_context: Option<String>,
         status: DeliveryStatus,
+        published_at: Option<String>,
         detected_at: Option<String>,
         cursor: Option<StreamCursor>,
     ) -> Result<Self, ApiError> {
@@ -464,6 +466,7 @@ impl DeliveryListItem {
             headline,
             source_context: non_empty_optional(source_context),
             status,
+            published_at: non_empty_optional(published_at),
             detected_at: non_empty_optional(detected_at),
             cursor,
         })
@@ -489,6 +492,16 @@ impl DeliveryListItem {
         &self.status
     }
 
+    /// Returns the API timestamp string for route-feed publication time, when provided.
+    pub fn published_at(&self) -> Option<&str> {
+        self.published_at.as_deref()
+    }
+
+    /// Returns the preferred timestamp for list display.
+    pub fn display_timestamp(&self) -> Option<&str> {
+        self.published_at().or_else(|| self.detected_at())
+    }
+
     /// Returns the API timestamp string for detection time, when provided.
     pub fn detected_at(&self) -> Option<&str> {
         self.detected_at.as_deref()
@@ -510,6 +523,7 @@ pub struct DeliveryDetail {
     source_url: Option<String>,
     source_context: Option<String>,
     status: DeliveryStatus,
+    published_at: Option<String>,
     detected_at: Option<String>,
     matched_routes: Vec<MatchedRoute>,
     cursor: Option<StreamCursor>,
@@ -526,6 +540,7 @@ impl DeliveryDetail {
         source_url: Option<String>,
         source_context: Option<String>,
         status: DeliveryStatus,
+        published_at: Option<String>,
         detected_at: Option<String>,
         matched_routes: Vec<MatchedRoute>,
         cursor: Option<StreamCursor>,
@@ -546,6 +561,7 @@ impl DeliveryDetail {
             source_url: non_empty_optional(source_url),
             source_context: non_empty_optional(source_context),
             status,
+            published_at: non_empty_optional(published_at),
             detected_at: non_empty_optional(detected_at),
             matched_routes,
             cursor,
@@ -585,6 +601,16 @@ impl DeliveryDetail {
     /// Returns the API status label.
     pub fn status(&self) -> &DeliveryStatus {
         &self.status
+    }
+
+    /// Returns the API timestamp string for route-feed publication time, when provided.
+    pub fn published_at(&self) -> Option<&str> {
+        self.published_at.as_deref()
+    }
+
+    /// Returns the preferred timestamp for detail display.
+    pub fn display_timestamp(&self) -> Option<&str> {
+        self.published_at().or_else(|| self.detected_at())
     }
 
     /// Returns the API timestamp string for detection time, when provided.
@@ -691,6 +717,8 @@ struct DeliveryResponse {
     )]
     source_context: Option<String>,
     status: String,
+    #[serde(default, alias = "publishedAt")]
+    published_at: Option<String>,
     #[serde(default, alias = "detectedAt")]
     detected_at: Option<String>,
     #[serde(default)]
@@ -712,6 +740,7 @@ impl DeliveryResponse {
             self.headline,
             self.source_context,
             DeliveryStatus::new(self.status)?,
+            self.published_at,
             self.detected_at,
             self.cursor.map(StreamCursor::new).transpose()?,
         )
@@ -732,6 +761,7 @@ impl DeliveryResponse {
             self.source_url,
             self.source_context,
             DeliveryStatus::new(self.status)?,
+            self.published_at,
             self.detected_at,
             matched_routes,
             self.cursor.map(StreamCursor::new).transpose()?,
@@ -1867,6 +1897,7 @@ mod tests {
                                 "headline": "CPU alert routed to ops",
                                 "source_context": "Datadog",
                                 "status": "delivered",
+                                "published_at": "2026-06-04T19:09:10Z",
                                 "detected_at": "2026-06-04T02:03:04Z",
                                 "cursor": "cur_01"
                             }
@@ -1885,6 +1916,7 @@ mod tests {
                             "source_url": "https://alerts.example/incidents/1",
                             "source_context": "Datadog",
                             "status": "delivered",
+                            "published_at": "2026-06-04T19:09:10Z",
                             "detected_at": "2026-06-04T02:03:04Z",
                             "matched_routes": ["Ops Escalation"],
                             "cursor": "cur_01"
@@ -1908,6 +1940,7 @@ mod tests {
         assert_eq!(page.items()[0].headline(), "CPU alert routed to ops");
         assert_eq!(page.items()[0].source_context(), Some("Datadog"));
         assert_eq!(page.items()[0].status().as_str(), "delivered");
+        assert_eq!(page.items()[0].published_at(), Some("2026-06-04T19:09:10Z"));
         assert_eq!(page.items()[0].detected_at(), Some("2026-06-04T02:03:04Z"));
         assert_eq!(
             page.items()[0].cursor().map(StreamCursor::as_str),
@@ -1923,6 +1956,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(detail.public_delivery_id().as_str(), "del_pub_01");
+        assert_eq!(detail.published_at(), Some("2026-06-04T19:09:10Z"));
         assert_eq!(
             detail.summary(),
             Some("CPU stayed over threshold for five minutes.")
@@ -1963,6 +1997,7 @@ mod tests {
         assert_eq!(item.headline(), "Deploy complete");
         assert_eq!(item.status().as_str(), "delivered");
         assert_eq!(item.source_context(), None);
+        assert_eq!(item.published_at(), None);
         assert_eq!(item.detected_at(), None);
         assert_eq!(item.cursor(), None);
 

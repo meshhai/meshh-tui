@@ -699,7 +699,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(2),
         ])
@@ -743,7 +743,7 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
         .unwrap_or_else(|| "-".to_owned());
     let line = Line::from(vec![
         Span::styled(
-            "MESHH ROUTE FEED",
+            format!("meshh-tui v{}", env!("CARGO_PKG_VERSION")),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -760,10 +760,7 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
         Span::raw(format!("history: {history}")),
     ]);
 
-    frame.render_widget(
-        Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -777,7 +774,11 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
 
         frame.render_widget(
             Paragraph::new(message)
-                .block(Block::default().borders(Borders::ALL).title("Deliveries"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                )
                 .wrap(Wrap { trim: true }),
             area,
         );
@@ -786,7 +787,7 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
 
     let rows = state.deliveries().iter().map(|item| {
         Row::new(vec![
-            Cell::from(item.detected_at().unwrap_or("-").to_owned()),
+            Cell::from(format_feed_timestamp(item.display_timestamp())),
             Cell::from(item.headline().to_owned()),
             Cell::from(item.source_context().unwrap_or("-").to_owned()),
             Cell::from(item.status().as_str().to_owned()),
@@ -803,7 +804,7 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
         ],
     )
     .header(
-        Row::new(vec!["Detected", "Headline", "Source", "Status"]).style(
+        Row::new(vec!["Published", "Headline", "Source", "Status"]).style(
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
@@ -812,13 +813,7 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(
-                "Deliveries",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            .border_style(Style::default().fg(Color::DarkGray)),
     )
     .column_spacing(1)
     .row_highlight_style(
@@ -885,7 +880,10 @@ fn detail_text(detail: Option<&DeliveryDetail>) -> Text<'static> {
         )),
         Line::from(""),
         Line::from(format!("Status: {}", detail.status().as_str())),
-        Line::from(format!("Detected: {}", detail.detected_at().unwrap_or("-"))),
+        Line::from(format!(
+            "Published: {}",
+            format_feed_timestamp(detail.display_timestamp())
+        )),
         Line::from(format!(
             "Source: {}",
             detail.source_context().unwrap_or("-")
@@ -898,6 +896,56 @@ fn detail_text(detail: Option<&DeliveryDetail>) -> Text<'static> {
         Line::from(""),
         Line::from(summary_or_body.to_owned()),
     ])
+}
+
+fn format_feed_timestamp(timestamp: Option<&str>) -> String {
+    let Some(timestamp) = timestamp else {
+        return "-".to_owned();
+    };
+
+    match compact_iso_timestamp(timestamp) {
+        Some(compact) => compact,
+        None => timestamp.to_owned(),
+    }
+}
+
+fn compact_iso_timestamp(timestamp: &str) -> Option<String> {
+    let parts = timestamp
+        .split_once('T')
+        .or_else(|| timestamp.split_once(' '))?;
+    if parts.0.len() != 10 || parts.1.len() < 5 {
+        return None;
+    }
+
+    let month = match &parts.0[5..7] {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return None,
+    };
+    let day = &parts.0[8..10];
+    let time = &parts.1[..5];
+
+    if !day.bytes().all(|byte| byte.is_ascii_digit())
+        || !time.as_bytes()[0].is_ascii_digit()
+        || !time.as_bytes()[1].is_ascii_digit()
+        || time.as_bytes()[2] != b':'
+        || !time.as_bytes()[3].is_ascii_digit()
+        || !time.as_bytes()[4].is_ascii_digit()
+    {
+        return None;
+    }
+
+    Some(format!("{month} {day} {time}"))
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -1205,7 +1253,8 @@ mod tests {
         assert!(list_text.contains("CPU alert routed to ops"));
         assert!(list_text.contains("Datadog"));
         assert!(list_text.contains("delivered"));
-        assert!(list_text.contains("2026-06-04T02:03:04Z"));
+        assert!(list_text.contains("Published"));
+        assert!(list_text.contains("Jun 04 19:09"));
 
         state.open_selected_detail().unwrap();
         state.receive_detail(detail("del_pub_01", "CPU alert routed to ops"));
@@ -1215,6 +1264,7 @@ mod tests {
         assert!(detail_text.contains("A production route matched this delivery."));
         assert!(detail_text.contains("https://alerts.example/del_pub_01"));
         assert!(detail_text.contains("Ops Escalation"));
+        assert!(detail_text.contains("Published: Jun 04 19:09"));
     }
 
     #[test]
@@ -1258,6 +1308,7 @@ mod tests {
             headline,
             source_context.map(str::to_owned),
             DeliveryStatus::new("delivered").unwrap(),
+            Some("2026-06-04T19:09:10Z".to_owned()),
             Some("2026-06-04T02:03:04Z".to_owned()),
             cursor.map(|cursor| StreamCursor::new(cursor).unwrap()),
         )
@@ -1273,6 +1324,7 @@ mod tests {
             Some(format!("https://alerts.example/{public_delivery_id}")),
             Some("GitHub".to_owned()),
             DeliveryStatus::new("delivered").unwrap(),
+            Some("2026-06-04T19:09:10Z".to_owned()),
             Some("2026-06-04T02:03:04Z".to_owned()),
             vec![MatchedRoute::new("Ops Escalation").unwrap()],
             None,
