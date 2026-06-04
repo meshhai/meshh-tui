@@ -1,3 +1,7 @@
-fn main() {
-    println!("Hello, world!");
+use clap::Parser;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = meshh_tui::cli::Cli::parse();
+    meshh_tui::cli::run(cli).await
 }
