@@ -3,6 +3,7 @@ use std::{
     fmt, fs, io,
     io::Write,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -245,29 +246,61 @@ pub fn default_credentials_path() -> Result<PathBuf, CredentialError> {
 fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        Ok(()) => {}
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => return Err(source),
-    }
+    let temp_path = temporary_secret_file_path(path);
 
     let mut file = fs::OpenOptions::new()
         .create(true)
-        .truncate(true)
+        .create_new(true)
+        .truncate(false)
         .write(true)
         .mode(0o600)
-        .open(path)?;
+        .open(&temp_path)?;
 
     file.write_all(contents)?;
     file.flush()?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, path).inspect_err(|_source| {
+        let _ = fs::remove_file(&temp_path);
+    })?;
 
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    fs::write(path, contents)
+    let temp_path = temporary_secret_file_path(path);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .create_new(true)
+        .truncate(false)
+        .write(true)
+        .open(&temp_path)?;
+
+    file.write_all(contents)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, path).inspect_err(|_source| {
+        let _ = fs::remove_file(&temp_path);
+    })?;
+
+    Ok(())
+}
+
+fn temporary_secret_file_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("credentials");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    parent.join(format!(".{file_name}.tmp-{}-{unique}", std::process::id()))
 }
 
 #[cfg(test)]
@@ -331,6 +364,37 @@ mod tests {
         assert_eq!(mode, 0o600);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_replaces_symlink_without_truncating_target() {
+        use std::os::unix::fs::symlink;
+
+        let path = temp_file_path("meshh-symlink-credentials", "json");
+        let target = temp_file_path("meshh-symlink-target", "txt");
+        fs::write(&target, "do not truncate").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let store = FileCredentialStore::new(&path);
+        let token = BearerToken::new("replacement-token").unwrap();
+
+        store.save_token(&token).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "do not truncate");
+        assert!(
+            !fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            store.load_token().unwrap().unwrap().as_str(),
+            "replacement-token"
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(target);
     }
 
     fn temp_file_path(prefix: &str, extension: &str) -> PathBuf {

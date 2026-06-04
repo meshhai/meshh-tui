@@ -1,4 +1,10 @@
-use std::{env, error::Error, fmt, future::Future, time::Duration};
+use std::{
+    env,
+    error::Error,
+    fmt,
+    future::Future,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -11,7 +17,6 @@ const DEVICE_TOKEN_PATH: &str = "/api/v1/tui/device-tokens";
 const DELIVERY_LIST_PATH: &str = "/api/v1/destination/deliveries";
 const DELIVERY_STREAM_PATH: &str = "/api/v1/destination/stream";
 const CLIENT_NAME: &str = "meshh-tui";
-const DEFAULT_DEVICE_AUTHORIZATION_EXPIRES_IN_SECS: u64 = 600;
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -190,7 +195,7 @@ impl TryFrom<DeviceAuthorizationResponse> for DeviceAuthorization {
     type Error = ApiError;
 
     fn try_from(response: DeviceAuthorizationResponse) -> Result<Self, Self::Error> {
-        let expires_in = response.expires_in_secs()?;
+        let expires_in = response.expires_in_secs_at(SystemTime::now())?;
 
         Self::new(
             DeviceCode::new(response.device_code)?,
@@ -204,17 +209,28 @@ impl TryFrom<DeviceAuthorizationResponse> for DeviceAuthorization {
 }
 
 impl DeviceAuthorizationResponse {
-    fn expires_in_secs(&self) -> Result<u64, ApiError> {
+    fn expires_in_secs_at(&self, now: SystemTime) -> Result<u64, ApiError> {
         if let Some(expires_in) = self.expires_in {
             return Ok(expires_in);
         }
 
-        if self
-            .expires_at
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return Ok(DEFAULT_DEVICE_AUTHORIZATION_EXPIRES_IN_SECS);
+        if let Some(expires_at) = self.expires_at.as_deref() {
+            let expires_at_epoch_secs = parse_utc_rfc3339_epoch_secs(expires_at)?;
+            let now_epoch_secs = now
+                .duration_since(UNIX_EPOCH)
+                .map_err(|source| ApiError::InvalidResponse {
+                    message: format!("system clock is before Unix epoch: {source}"),
+                })?
+                .as_secs();
+            let remaining = expires_at_epoch_secs.saturating_sub(now_epoch_secs);
+
+            if remaining > 0 {
+                return Ok(remaining);
+            }
+
+            return Err(ApiError::InvalidResponse {
+                message: "device authorization response expires_at is already expired".to_owned(),
+            });
         }
 
         Err(ApiError::InvalidResponse {
@@ -222,6 +238,96 @@ impl DeviceAuthorizationResponse {
                 .to_owned(),
         })
     }
+}
+
+fn parse_utc_rfc3339_epoch_secs(value: &str) -> Result<u64, ApiError> {
+    let trimmed = value.trim();
+    let timestamp = trimmed
+        .strip_suffix('Z')
+        .ok_or_else(|| invalid_expires_at(trimmed))?;
+    let (date, time) = timestamp
+        .split_once('T')
+        .ok_or_else(|| invalid_expires_at(trimmed))?;
+    let mut date_parts = date.split('-');
+    let year = parse_expires_at_part(trimmed, date_parts.next())?;
+    let month = parse_expires_at_part(trimmed, date_parts.next())?;
+    let day = parse_expires_at_part(trimmed, date_parts.next())?;
+
+    if date_parts.next().is_some() {
+        return Err(invalid_expires_at(trimmed));
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = parse_expires_at_part(trimmed, time_parts.next())?;
+    let minute = parse_expires_at_part(trimmed, time_parts.next())?;
+    let second_part = time_parts
+        .next()
+        .ok_or_else(|| invalid_expires_at(trimmed))?;
+    let second = parse_expires_at_part(
+        trimmed,
+        Some(
+            second_part
+                .split_once('.')
+                .map_or(second_part, |(second, _fraction)| second),
+        ),
+    )?;
+
+    if time_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return Err(invalid_expires_at(trimmed));
+    }
+
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return Err(invalid_expires_at(trimmed));
+    }
+
+    Ok(days as u64 * 86_400 + hour as u64 * 3_600 + minute as u64 * 60 + second as u64)
+}
+
+fn parse_expires_at_part(value: &str, part: Option<&str>) -> Result<i64, ApiError> {
+    part.filter(|part| !part.is_empty())
+        .and_then(|part| part.parse::<i64>().ok())
+        .ok_or_else(|| invalid_expires_at(value))
+}
+
+fn invalid_expires_at(value: &str) -> ApiError {
+    ApiError::InvalidResponse {
+        message: format!(
+            "device authorization response had an invalid expires_at `{}`",
+            clipped(value)
+        ),
+    }
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    era * 146_097 + day_of_era - 719_468
 }
 
 fn default_device_poll_interval_secs() -> u64 {
@@ -1656,7 +1762,10 @@ impl Error for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::mpsc,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use serde_json::Value;
 
@@ -1711,22 +1820,69 @@ mod tests {
                     "user_code": "ABCD-EFGH",
                     "verification_uri": "https://mesh.example/en/tui/login",
                     "verification_uri_complete": "https://mesh.example/en/tui/login?code=ABCD-EFGH",
-                    "expires_at": "2026-06-04T09:29:52Z",
+                    "expires_at": "1970-01-01T00:11:40Z",
                     "interval": 5
                 }"#,
             ),
             "creating a device authorization",
         )
         .unwrap();
-        let authorization = DeviceAuthorization::try_from(response).unwrap();
+        let expires_in = response
+            .expires_in_secs_at(UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
 
-        assert_eq!(authorization.device_code().as_str(), "device-code");
+        assert_eq!(expires_in, 600);
+    }
+
+    #[test]
+    fn computes_device_authorization_expires_at_for_shorter_and_longer_windows() {
+        let response = super::DeviceAuthorizationResponse {
+            device_code: "device-code".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            verification_url: "https://mesh.example/en/tui/login".to_owned(),
+            verification_url_complete: None,
+            expires_in: None,
+            expires_at: Some("1970-01-01T00:03:00Z".to_owned()),
+            interval: 5,
+        };
+
         assert_eq!(
-            authorization.verification_url(),
-            "https://mesh.example/en/tui/login"
+            response
+                .expires_in_secs_at(UNIX_EPOCH + Duration::from_secs(120))
+                .unwrap(),
+            60
         );
-        assert_eq!(authorization.expires_in(), Duration::from_secs(600));
-        assert_eq!(authorization.poll_interval(), Duration::from_secs(5));
+
+        let response = super::DeviceAuthorizationResponse {
+            expires_at: Some("1970-01-01T01:00:00Z".to_owned()),
+            ..response
+        };
+
+        assert_eq!(
+            response
+                .expires_in_secs_at(UNIX_EPOCH + Duration::from_secs(600))
+                .unwrap(),
+            3_000
+        );
+    }
+
+    #[test]
+    fn rejects_expired_device_authorization_expires_at() {
+        let response = super::DeviceAuthorizationResponse {
+            device_code: "device-code".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            verification_url: "https://mesh.example/en/tui/login".to_owned(),
+            verification_url_complete: None,
+            expires_in: None,
+            expires_at: Some("1970-01-01T00:03:00Z".to_owned()),
+            interval: 5,
+        };
+
+        let error = response
+            .expires_in_secs_at(UNIX_EPOCH + Duration::from_secs(180))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already expired"));
     }
 
     #[tokio::test]
