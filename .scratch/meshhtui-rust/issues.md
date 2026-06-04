@@ -1,3 +1,7 @@
+# Review notes
+
+- [ ] Honor device-flow `slow_down` responses by increasing the polling interval before retrying, with tests covering the response mapping and sleep cadence.
+
 # Meshh TUI Issues
 
 ## 1. Project Foundation
@@ -121,6 +125,6 @@ Prepare the repo for a first alpha release.
 
 - [x] README includes screenshots or an asciinema-style terminal example.
 - [x] License, contribution notes, and security/reporting guidance are present.
-- [x] CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- [ ] CI runs the Rust feedback loop on pull requests and pushes to the repository default branch.
 - [ ] Release build works locally.
 - [ ] No secrets, internal Meshh IDs, or local-only paths are committed.
