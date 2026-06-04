@@ -123,4 +123,4 @@ Prepare the repo for a first alpha release.
 - [x] License, contribution notes, and security/reporting guidance are present.
 - [ ] CI runs the Rust feedback loop on pull requests and pushes to the repository default branch.
 - [ ] Release build works locally.
-- [ ] No secrets, internal Meshh IDs, or local-only paths are committed.
+- [x] No secrets, internal Meshh IDs, or local-only paths are committed.
