@@ -14,6 +14,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 use crate::{
     api::{
@@ -1078,10 +1079,43 @@ fn format_delivery_timestamp(timestamp: Option<&str>) -> String {
         return "-".to_owned();
     };
 
-    match compact_iso_timestamp(timestamp) {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    match compact_timestamp_at_offset(timestamp, local_offset) {
         Some(compact) => compact,
         None => timestamp.to_owned(),
     }
+}
+
+fn compact_timestamp_at_offset(timestamp: &str, offset: UtcOffset) -> Option<String> {
+    if let Ok(parsed) = OffsetDateTime::parse(timestamp, &Rfc3339) {
+        return Some(format_compact_datetime(parsed.to_offset(offset)));
+    }
+
+    compact_iso_timestamp(timestamp)
+}
+
+fn format_compact_datetime(datetime: OffsetDateTime) -> String {
+    let month = match datetime.month() {
+        time::Month::January => "Jan",
+        time::Month::February => "Feb",
+        time::Month::March => "Mar",
+        time::Month::April => "Apr",
+        time::Month::May => "May",
+        time::Month::June => "Jun",
+        time::Month::July => "Jul",
+        time::Month::August => "Aug",
+        time::Month::September => "Sep",
+        time::Month::October => "Oct",
+        time::Month::November => "Nov",
+        time::Month::December => "Dec",
+    };
+
+    format!(
+        "{month} {:02} {:02}:{:02}",
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute()
+    )
 }
 
 fn compact_iso_timestamp(timestamp: &str) -> Option<String> {
@@ -1650,7 +1684,8 @@ mod tests {
         assert!(list_text.contains("Datadog"));
         assert!(list_text.contains("delivered"));
         assert!(list_text.contains("Published"));
-        assert!(list_text.contains("Jun 04 19:09"));
+        let expected_timestamp = super::format_delivery_timestamp(Some("2026-06-04T19:09:10Z"));
+        assert!(list_text.contains(&expected_timestamp));
 
         state.open_selected_detail().unwrap();
         apply_detail(&mut state, detail("del_pub_01", "CPU alert routed to ops"));
@@ -1660,7 +1695,23 @@ mod tests {
         assert!(detail_text.contains("A production route matched this delivery."));
         assert!(detail_text.contains("https://alerts.example/del_pub_01"));
         assert!(detail_text.contains("Ops Escalation"));
-        assert!(detail_text.contains("Published: Jun 04 19:09"));
+        assert!(detail_text.contains(&format!("Published: {expected_timestamp}")));
+    }
+
+    #[test]
+    fn timestamp_formatting_converts_rfc3339_to_user_offset() {
+        let timestamp = "2026-06-04T19:09:10Z";
+        let tokyo = time::UtcOffset::from_hms(9, 0, 0).unwrap();
+        let new_york = time::UtcOffset::from_hms(-4, 0, 0).unwrap();
+
+        assert_eq!(
+            super::compact_timestamp_at_offset(timestamp, tokyo).as_deref(),
+            Some("Jun 05 04:09")
+        );
+        assert_eq!(
+            super::compact_timestamp_at_offset(timestamp, new_york).as_deref(),
+            Some("Jun 04 15:09")
+        );
     }
 
     #[test]
