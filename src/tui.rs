@@ -1,4 +1,4 @@
-use std::{collections::HashSet, error::Error, fmt, io, sync::mpsc, time::Duration};
+use std::{error::Error, fmt, io, sync::mpsc, time::Duration};
 
 use crossterm::{
     cursor::Show,
@@ -7,19 +7,25 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame, Terminal,
+    Terminal,
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
-use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+
+mod render;
+mod state;
+mod stream_session;
+mod time_display;
+
+pub use render::render;
+pub use state::{
+    AppCommand, AppError, AppErrorKind, AppState, DeliveryListStatus, DetailStatus, KeyAction,
+    Screen, StreamStatus,
+};
 
 use crate::{
     api::{
-        ApiClient, ApiClientConfig, ApiError, DeliveryApi, DeliveryDetail, DeliveryListItem,
-        DeliveryListPage, DeliveryStreamFrame, PublicDeliveryId, StreamCursor,
+        ApiClient, ApiClientConfig, ApiError, DeliveryApi, DeliveryDetail, DeliveryListPage,
+        DeliveryStreamFrame, PublicDeliveryId, StreamCursor,
     },
     config::RuntimeConfig,
     credentials::{BearerToken, CredentialError, CredentialStore, FileCredentialStore},
@@ -27,480 +33,6 @@ use crate::{
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STREAM_RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
-
-/// High-level screen currently shown by the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Screen {
-    DeliveryList,
-    DeliveryDetail {
-        public_delivery_id: PublicDeliveryId,
-    },
-}
-
-/// Delivery list state visible to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryListStatus {
-    Loading,
-    Ready,
-    Empty,
-    Error(AppError),
-}
-
-/// Detail panel state visible to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DetailStatus {
-    Hidden,
-    Loading,
-    Ready,
-    Error(AppError),
-}
-
-/// Live delivery stream state visible to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamStatus {
-    Disconnected,
-    Connecting,
-    Live,
-    Reconnecting(AppError),
-    Error(AppError),
-}
-
-/// User-visible error category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppErrorKind {
-    Authentication,
-    Network,
-    Api,
-}
-
-/// User-visible error message retained in app state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppError {
-    kind: AppErrorKind,
-    message: String,
-}
-
-impl AppError {
-    /// Creates a user-visible error.
-    pub fn new(kind: AppErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-
-    /// Converts an API error into a visible TUI error.
-    pub fn from_api_error(error: &ApiError) -> Self {
-        let kind = match error {
-            ApiError::Authentication { .. } => AppErrorKind::Authentication,
-            ApiError::Transport { .. } => AppErrorKind::Network,
-            ApiError::HttpStatus { .. } | ApiError::InvalidResponse { .. } => AppErrorKind::Api,
-        };
-
-        Self::new(kind, error.to_string())
-    }
-
-    /// Returns the error category.
-    pub fn kind(&self) -> AppErrorKind {
-        self.kind
-    }
-
-    /// Returns the displayable error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    fn heading(&self) -> &'static str {
-        match self.kind {
-            AppErrorKind::Authentication => "Authentication error",
-            AppErrorKind::Network => "Network error",
-            AppErrorKind::Api => "API error",
-        }
-    }
-}
-
-/// Keyboard action understood by the app state reducer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyAction {
-    Up,
-    Down,
-    Open,
-    Back,
-    Refresh,
-    Quit,
-}
-
-/// Side effect requested by the app state reducer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppCommand {
-    None,
-    LoadDeliveries {
-        generation: u64,
-    },
-    LoadDetail {
-        public_delivery_id: PublicDeliveryId,
-        generation: u64,
-    },
-    Quit,
-}
-
-/// Testable application state for the terminal UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppState {
-    screen: Screen,
-    delivery_list_status: DeliveryListStatus,
-    stream_status: StreamStatus,
-    deliveries: Vec<DeliveryListItem>,
-    selected_index: Option<usize>,
-    next_cursor: Option<StreamCursor>,
-    stream_resume_cursor: Option<StreamCursor>,
-    seen_stream_cursors: HashSet<StreamCursor>,
-    detail_status: DetailStatus,
-    detail: Option<DeliveryDetail>,
-    list_request_generation: u64,
-    detail_request_generation: u64,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            screen: Screen::DeliveryList,
-            delivery_list_status: DeliveryListStatus::Loading,
-            stream_status: StreamStatus::Disconnected,
-            deliveries: Vec::new(),
-            selected_index: None,
-            next_cursor: None,
-            stream_resume_cursor: None,
-            seen_stream_cursors: HashSet::new(),
-            detail_status: DetailStatus::Hidden,
-            detail: None,
-            list_request_generation: 0,
-            detail_request_generation: 0,
-        }
-    }
-}
-
-impl AppState {
-    /// Returns the active screen.
-    pub fn screen(&self) -> &Screen {
-        &self.screen
-    }
-
-    /// Returns the current delivery list status.
-    pub fn delivery_list_status(&self) -> &DeliveryListStatus {
-        &self.delivery_list_status
-    }
-
-    /// Returns the live delivery stream status.
-    pub fn stream_status(&self) -> &StreamStatus {
-        &self.stream_status
-    }
-
-    /// Returns the visible detail status.
-    pub fn detail_status(&self) -> &DetailStatus {
-        &self.detail_status
-    }
-
-    /// Returns the loaded delivery rows.
-    pub fn deliveries(&self) -> &[DeliveryListItem] {
-        &self.deliveries
-    }
-
-    /// Returns the selected row index.
-    pub fn selected_index(&self) -> Option<usize> {
-        self.selected_index
-    }
-
-    /// Returns the selected row, when one is available.
-    pub fn selected_delivery(&self) -> Option<&DeliveryListItem> {
-        self.selected_index
-            .and_then(|index| self.deliveries.get(index))
-    }
-
-    /// Returns the next history cursor from the last list response.
-    pub fn next_cursor(&self) -> Option<&StreamCursor> {
-        self.next_cursor.as_ref()
-    }
-
-    /// Returns the cursor that should be sent as the next stream `after` value.
-    pub fn stream_resume_cursor(&self) -> Option<&StreamCursor> {
-        self.stream_resume_cursor.as_ref()
-    }
-
-    /// Returns the loaded detail record.
-    pub fn detail(&self) -> Option<&DeliveryDetail> {
-        self.detail.as_ref()
-    }
-
-    /// Moves the delivery list into a loading state.
-    pub fn start_loading(&mut self) {
-        self.screen = Screen::DeliveryList;
-        self.delivery_list_status = DeliveryListStatus::Loading;
-        self.detail_status = DetailStatus::Hidden;
-        self.detail = None;
-        self.list_request_generation = self.list_request_generation.saturating_add(1);
-        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
-    }
-
-    /// Applies a successful delivery list response.
-    pub fn receive_delivery_page(&mut self, generation: u64, page: DeliveryListPage) {
-        if generation != self.list_request_generation {
-            return;
-        }
-
-        self.deliveries = page.items().to_vec();
-        self.selected_index = if self.deliveries.is_empty() {
-            None
-        } else {
-            Some(0)
-        };
-        self.next_cursor = page.next_cursor().cloned();
-        self.track_page_cursors();
-        self.delivery_list_status = if self.deliveries.is_empty() {
-            DeliveryListStatus::Empty
-        } else {
-            DeliveryListStatus::Ready
-        };
-    }
-
-    /// Applies a failed delivery list response without panicking or printing secrets.
-    pub fn receive_list_error(&mut self, generation: u64, error: &ApiError) {
-        if generation != self.list_request_generation {
-            return;
-        }
-
-        self.delivery_list_status = DeliveryListStatus::Error(AppError::from_api_error(error));
-        self.clamp_selection();
-    }
-
-    /// Moves the stream into a connecting state.
-    pub fn start_stream(&mut self) {
-        self.stream_status = StreamStatus::Connecting;
-    }
-
-    /// Applies stream frames, prepending new deliveries and suppressing cursor replays.
-    pub fn receive_stream_frames(&mut self, frames: Vec<DeliveryStreamFrame>) {
-        let mut inserted_delivery = false;
-
-        for frame in frames {
-            match frame {
-                DeliveryStreamFrame::Connected => {}
-                DeliveryStreamFrame::Cursor(cursor) => self.note_stream_cursor(cursor),
-                DeliveryStreamFrame::Delivery { cursor, item } => {
-                    let cursor = cursor.or_else(|| item.cursor().cloned());
-                    if let Some(cursor) = cursor {
-                        if !self.seen_stream_cursors.insert(cursor.clone()) {
-                            continue;
-                        }
-
-                        self.stream_resume_cursor = Some(cursor);
-                    }
-
-                    self.insert_or_replace_stream_delivery(item);
-                    inserted_delivery = true;
-                }
-            }
-        }
-
-        if inserted_delivery {
-            self.delivery_list_status = if self.deliveries.is_empty() {
-                DeliveryListStatus::Empty
-            } else {
-                DeliveryListStatus::Ready
-            };
-        }
-
-        self.stream_status = StreamStatus::Live;
-    }
-
-    /// Applies a stream error while keeping the loaded list visible.
-    pub fn receive_stream_error(&mut self, error: &ApiError) {
-        let app_error = AppError::from_api_error(error);
-
-        self.stream_status = if app_error.kind() == AppErrorKind::Authentication {
-            StreamStatus::Error(app_error)
-        } else {
-            StreamStatus::Reconnecting(app_error)
-        };
-    }
-
-    /// Moves selection one row up.
-    pub fn select_previous(&mut self) {
-        if let Some(index) = self.selected_index {
-            self.selected_index = Some(index.saturating_sub(1));
-        }
-    }
-
-    /// Moves selection one row down.
-    pub fn select_next(&mut self) {
-        if let Some(index) = self.selected_index {
-            self.selected_index = Some((index + 1).min(self.deliveries.len().saturating_sub(1)));
-        }
-    }
-
-    /// Opens the selected delivery detail screen and returns the ID to load.
-    pub fn open_selected_detail(&mut self) -> Option<PublicDeliveryId> {
-        let public_delivery_id = self.selected_delivery()?.public_delivery_id().clone();
-
-        self.screen = Screen::DeliveryDetail {
-            public_delivery_id: public_delivery_id.clone(),
-        };
-        self.detail_status = DetailStatus::Loading;
-        self.detail = None;
-        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
-
-        Some(public_delivery_id)
-    }
-
-    /// Applies a successful detail response.
-    pub fn receive_detail(&mut self, generation: u64, detail: DeliveryDetail) {
-        let public_delivery_id = detail.public_delivery_id().clone();
-
-        if !self.detail_request_matches(generation, &public_delivery_id) {
-            return;
-        }
-
-        self.screen = Screen::DeliveryDetail { public_delivery_id };
-        self.detail_status = DetailStatus::Ready;
-        self.detail = Some(detail);
-    }
-
-    /// Applies a failed detail response while keeping the detail screen visible.
-    pub fn receive_detail_error(&mut self, generation: u64, error: &ApiError) {
-        if generation != self.detail_request_generation {
-            return;
-        }
-
-        self.detail_status = DetailStatus::Error(AppError::from_api_error(error));
-    }
-
-    /// Returns from detail to the delivery list.
-    pub fn close_detail(&mut self) {
-        self.screen = Screen::DeliveryList;
-        self.detail_status = DetailStatus::Hidden;
-        self.detail = None;
-        self.detail_request_generation = self.detail_request_generation.saturating_add(1);
-    }
-
-    /// Applies a keyboard action and returns any side effect the caller must perform.
-    pub fn handle_key_action(&mut self, action: KeyAction) -> AppCommand {
-        match action {
-            KeyAction::Quit => AppCommand::Quit,
-            KeyAction::Up => {
-                if matches!(self.screen, Screen::DeliveryList) {
-                    self.select_previous();
-                }
-
-                AppCommand::None
-            }
-            KeyAction::Down => {
-                if matches!(self.screen, Screen::DeliveryList) {
-                    self.select_next();
-                }
-
-                AppCommand::None
-            }
-            KeyAction::Open => {
-                if matches!(self.screen, Screen::DeliveryList) {
-                    self.open_selected_detail()
-                        .map(|public_delivery_id| AppCommand::LoadDetail {
-                            public_delivery_id,
-                            generation: self.detail_request_generation,
-                        })
-                        .unwrap_or(AppCommand::None)
-                } else {
-                    AppCommand::None
-                }
-            }
-            KeyAction::Back => {
-                if matches!(self.screen, Screen::DeliveryDetail { .. }) {
-                    self.close_detail();
-                }
-
-                AppCommand::None
-            }
-            KeyAction::Refresh => match self.screen() {
-                Screen::DeliveryList => {
-                    self.start_loading();
-                    AppCommand::LoadDeliveries {
-                        generation: self.list_request_generation,
-                    }
-                }
-                Screen::DeliveryDetail { public_delivery_id } => {
-                    let public_delivery_id = public_delivery_id.clone();
-                    self.detail_status = DetailStatus::Loading;
-                    self.detail = None;
-                    self.detail_request_generation =
-                        self.detail_request_generation.saturating_add(1);
-                    AppCommand::LoadDetail {
-                        public_delivery_id,
-                        generation: self.detail_request_generation,
-                    }
-                }
-            },
-        }
-    }
-
-    fn clamp_selection(&mut self) {
-        self.selected_index = match (self.selected_index, self.deliveries.len()) {
-            (_, 0) => None,
-            (Some(index), len) if index >= len => Some(len - 1),
-            (index, _) => index,
-        };
-    }
-
-    fn track_page_cursors(&mut self) {
-        let latest_page_cursor = self
-            .deliveries
-            .iter()
-            .find_map(|item| item.cursor().cloned());
-
-        for cursor in self.deliveries.iter().filter_map(DeliveryListItem::cursor) {
-            self.seen_stream_cursors.insert(cursor.clone());
-        }
-
-        if self.stream_resume_cursor.is_none() {
-            self.stream_resume_cursor = latest_page_cursor;
-        }
-    }
-
-    fn note_stream_cursor(&mut self, cursor: StreamCursor) {
-        self.stream_resume_cursor = Some(cursor);
-    }
-
-    fn detail_request_matches(
-        &self,
-        generation: u64,
-        public_delivery_id: &PublicDeliveryId,
-    ) -> bool {
-        generation == self.detail_request_generation
-            && matches!(
-                &self.screen,
-                Screen::DeliveryDetail {
-                    public_delivery_id: current_public_delivery_id
-                } if current_public_delivery_id == public_delivery_id
-            )
-    }
-
-    fn insert_or_replace_stream_delivery(&mut self, item: DeliveryListItem) {
-        let selected_id = self
-            .selected_delivery()
-            .map(|delivery| delivery.public_delivery_id().clone());
-        let incoming_id = item.public_delivery_id().clone();
-
-        self.deliveries
-            .retain(|delivery| delivery.public_delivery_id() != &incoming_id);
-        self.deliveries.insert(0, item);
-
-        self.selected_index = selected_id
-            .and_then(|selected_id| {
-                self.deliveries
-                    .iter()
-                    .position(|delivery| delivery.public_delivery_id() == &selected_id)
-            })
-            .or(Some(0));
-    }
-}
 
 /// Runs `meshh tui` using the default API client and credential store.
 pub async fn run(config: &RuntimeConfig) -> Result<(), TuiError> {
@@ -684,19 +216,14 @@ where
     let (sender, receiver) = mpsc::channel();
 
     tokio::spawn(async move {
-        let mut after = initial_after;
+        let mut reconnect = stream_session::DeliveryStreamReconnect::new(initial_after);
 
         loop {
             let frame_sender = sender.clone();
-            let mut next_after = after.clone();
-            let mut received_frame = false;
-            let stream_after = after.clone();
+            let stream_after = reconnect.begin_attempt();
             let result = api
                 .stream_deliveries(&token, stream_after.as_ref(), |frame| {
-                    if let Some(cursor) = delivery_frame_cursor(&frame) {
-                        next_after = Some(cursor);
-                    }
-                    received_frame = true;
+                    reconnect.accept_frame(&frame);
 
                     frame_sender
                         .send(StreamWorkerMessage::Frames(vec![frame]))
@@ -705,11 +232,10 @@ where
                         })
                 })
                 .await;
-            after = next_after;
 
             match result {
                 Ok(()) => {
-                    if !received_frame
+                    if !reconnect.received_frame()
                         && sender
                             .send(StreamWorkerMessage::Frames(Vec::new()))
                             .is_err()
@@ -808,16 +334,6 @@ fn ensure_stream_started<A>(
     }
 }
 
-fn delivery_frame_cursor(frame: &DeliveryStreamFrame) -> Option<StreamCursor> {
-    match frame {
-        DeliveryStreamFrame::Connected => None,
-        DeliveryStreamFrame::Cursor(cursor) => Some(cursor.clone()),
-        DeliveryStreamFrame::Delivery { cursor, item } => {
-            cursor.clone().or_else(|| item.cursor().cloned())
-        }
-    }
-}
-
 fn draw_state<B>(terminal: &mut Terminal<B>, state: &AppState) -> Result<(), TuiError>
 where
     B: Backend<Error = io::Error>,
@@ -865,305 +381,6 @@ fn key_action(key: KeyEvent) -> Option<KeyAction> {
         KeyCode::Char('r') => Some(KeyAction::Refresh),
         _ => None,
     }
-}
-
-/// Renders the TUI from immutable app state.
-pub fn render(frame: &mut Frame<'_>, state: &AppState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-
-    render_header(frame, layout[0], state);
-
-    match state.screen() {
-        Screen::DeliveryList => render_list(frame, layout[1], state),
-        Screen::DeliveryDetail { .. } => render_detail(frame, layout[1], state),
-    }
-
-    render_footer(frame, layout[2], state);
-}
-
-fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    let activity = header_activity(state);
-    let row_count = state.deliveries().len();
-    let rows = match row_count {
-        1 => "1 row".to_owned(),
-        count => format!("{count} rows"),
-    };
-    let selected = match (state.selected_index(), row_count) {
-        (Some(index), count) if count > 0 => format!("row {}/{}", index + 1, count),
-        _other => "no row".to_owned(),
-    };
-    let line = Line::from(vec![
-        Span::styled(
-            format!("meshh-tui v{}", env!("CARGO_PKG_VERSION")),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::raw(activity),
-        Span::raw(" | "),
-        Span::raw(rows),
-        Span::raw(" | "),
-        Span::raw(selected),
-    ]);
-
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-fn header_activity(state: &AppState) -> String {
-    match state.delivery_list_status() {
-        DeliveryListStatus::Loading => "loading".to_owned(),
-        DeliveryListStatus::Error(error) => error.heading().to_owned(),
-        DeliveryListStatus::Empty | DeliveryListStatus::Ready => {
-            stream_activity(state.stream_status())
-        }
-    }
-}
-
-fn stream_activity(stream_status: &StreamStatus) -> String {
-    match stream_status {
-        StreamStatus::Disconnected => "offline".to_owned(),
-        StreamStatus::Connecting => "connecting".to_owned(),
-        StreamStatus::Live => "live".to_owned(),
-        StreamStatus::Reconnecting(error) => format!("reconnecting: {}", error.heading()),
-        StreamStatus::Error(error) => error.heading().to_owned(),
-    }
-}
-
-fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    if state.deliveries().is_empty() {
-        let message = empty_list_message(state);
-
-        frame.render_widget(
-            Paragraph::new(message)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::DarkGray)),
-                )
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
-
-    let rows = state.deliveries().iter().map(|item| {
-        Row::new(vec![
-            Cell::from(format_delivery_timestamp(item.display_timestamp())),
-            Cell::from(item.source_context().unwrap_or("-").to_owned()),
-            Cell::from(item.headline().to_owned()),
-            Cell::from(item.status().as_str().to_owned()),
-        ])
-        .style(Style::default().fg(Color::White))
-    });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(12),
-            Constraint::Length(18),
-            Constraint::Min(24),
-            Constraint::Length(10),
-        ],
-    )
-    .header(
-        Row::new(vec!["Published", "Source", "Headline", "Status"]).style(
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    )
-    .column_spacing(1)
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
-    let mut table_state = TableState::default().with_selected(state.selected_index());
-
-    frame.render_stateful_widget(table, area, &mut table_state);
-}
-
-fn empty_list_message(state: &AppState) -> &str {
-    match state.delivery_list_status() {
-        DeliveryListStatus::Loading => "Loading route deliveries...",
-        DeliveryListStatus::Error(error) => error.message(),
-        DeliveryListStatus::Empty | DeliveryListStatus::Ready => match state.stream_status() {
-            StreamStatus::Reconnecting(error) | StreamStatus::Error(error) => error.message(),
-            _other => "No route deliveries yet.",
-        },
-    }
-}
-
-fn render_detail(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    let text = match state.detail_status() {
-        DetailStatus::Hidden => Text::from("No delivery selected."),
-        DetailStatus::Loading => Text::from("Loading delivery detail..."),
-        DetailStatus::Error(error) => Text::from(vec![
-            Line::from(error.heading()),
-            Line::from(""),
-            Line::from(error.message().to_owned()),
-        ]),
-        DetailStatus::Ready => detail_text(state.detail()),
-    };
-
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn detail_text(detail: Option<&DeliveryDetail>) -> Text<'static> {
-    let Some(detail) = detail else {
-        return Text::from("No delivery selected.");
-    };
-    let routes = if detail.matched_routes().is_empty() {
-        "-".to_owned()
-    } else {
-        detail
-            .matched_routes()
-            .iter()
-            .map(|route| route.name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let summary_or_body = detail
-        .summary()
-        .or_else(|| detail.body())
-        .unwrap_or("No summary provided.");
-
-    Text::from(vec![
-        Line::from(Span::styled(
-            detail.headline().to_owned(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(format!("Status: {}", detail.status().as_str())),
-        Line::from(format!(
-            "Published: {}",
-            format_delivery_timestamp(detail.display_timestamp())
-        )),
-        Line::from(format!(
-            "Source: {}",
-            detail.source_context().unwrap_or("-")
-        )),
-        Line::from(format!(
-            "Source URL: {}",
-            detail.source_url().unwrap_or("-")
-        )),
-        Line::from(format!("Matched routes: {routes}")),
-        Line::from(""),
-        Line::from(summary_or_body.to_owned()),
-    ])
-}
-
-fn format_delivery_timestamp(timestamp: Option<&str>) -> String {
-    let Some(timestamp) = timestamp else {
-        return "-".to_owned();
-    };
-
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    match compact_timestamp_at_offset(timestamp, local_offset) {
-        Some(compact) => compact,
-        None => timestamp.to_owned(),
-    }
-}
-
-fn compact_timestamp_at_offset(timestamp: &str, offset: UtcOffset) -> Option<String> {
-    if let Ok(parsed) = OffsetDateTime::parse(timestamp, &Rfc3339) {
-        return Some(format_compact_datetime(parsed.to_offset(offset)));
-    }
-
-    compact_iso_timestamp(timestamp)
-}
-
-fn format_compact_datetime(datetime: OffsetDateTime) -> String {
-    let month = match datetime.month() {
-        time::Month::January => "Jan",
-        time::Month::February => "Feb",
-        time::Month::March => "Mar",
-        time::Month::April => "Apr",
-        time::Month::May => "May",
-        time::Month::June => "Jun",
-        time::Month::July => "Jul",
-        time::Month::August => "Aug",
-        time::Month::September => "Sep",
-        time::Month::October => "Oct",
-        time::Month::November => "Nov",
-        time::Month::December => "Dec",
-    };
-
-    format!(
-        "{month} {:02} {:02}:{:02}",
-        datetime.day(),
-        datetime.hour(),
-        datetime.minute()
-    )
-}
-
-fn compact_iso_timestamp(timestamp: &str) -> Option<String> {
-    let parts = timestamp
-        .split_once('T')
-        .or_else(|| timestamp.split_once(' '))?;
-    if parts.0.len() != 10 || parts.1.len() < 5 || !parts.0.is_ascii() || !parts.1.is_ascii() {
-        return None;
-    }
-
-    let month = match &parts.0[5..7] {
-        "01" => "Jan",
-        "02" => "Feb",
-        "03" => "Mar",
-        "04" => "Apr",
-        "05" => "May",
-        "06" => "Jun",
-        "07" => "Jul",
-        "08" => "Aug",
-        "09" => "Sep",
-        "10" => "Oct",
-        "11" => "Nov",
-        "12" => "Dec",
-        _ => return None,
-    };
-    let day = &parts.0[8..10];
-    let time = &parts.1[..5];
-
-    if !day.bytes().all(|byte| byte.is_ascii_digit())
-        || !time.as_bytes()[0].is_ascii_digit()
-        || !time.as_bytes()[1].is_ascii_digit()
-        || time.as_bytes()[2] != b':'
-        || !time.as_bytes()[3].is_ascii_digit()
-        || !time.as_bytes()[4].is_ascii_digit()
-    {
-        return None;
-    }
-
-    Some(format!("{month} {day} {time}"))
-}
-
-fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
-    let message = match state.screen() {
-        Screen::DeliveryList => "up/down select | enter open | r refresh | q quit",
-        Screen::DeliveryDetail { .. } => "b back | r reload detail | q quit",
-    };
-
-    frame.render_widget(Paragraph::new(message), area);
 }
 
 /// Errors produced before or during the terminal UI session.
@@ -1684,7 +901,8 @@ mod tests {
         assert!(list_text.contains("Datadog"));
         assert!(list_text.contains("delivered"));
         assert!(list_text.contains("Published"));
-        let expected_timestamp = super::format_delivery_timestamp(Some("2026-06-04T19:09:10Z"));
+        let expected_timestamp =
+            super::time_display::format_delivery_timestamp(Some("2026-06-04T19:09:10Z"));
         assert!(list_text.contains(&expected_timestamp));
 
         state.open_selected_detail().unwrap();
@@ -1705,11 +923,11 @@ mod tests {
         let new_york = time::UtcOffset::from_hms(-4, 0, 0).unwrap();
 
         assert_eq!(
-            super::compact_timestamp_at_offset(timestamp, tokyo).as_deref(),
+            super::time_display::compact_timestamp_at_offset(timestamp, tokyo).as_deref(),
             Some("Jun 05 04:09")
         );
         assert_eq!(
-            super::compact_timestamp_at_offset(timestamp, new_york).as_deref(),
+            super::time_display::compact_timestamp_at_offset(timestamp, new_york).as_deref(),
             Some("Jun 04 15:09")
         );
     }
@@ -1718,7 +936,10 @@ mod tests {
     fn timestamp_formatting_falls_back_for_non_ascii_malformed_input() {
         let timestamp = "2026é6-04T19:09:00Z";
 
-        assert_eq!(super::format_delivery_timestamp(Some(timestamp)), timestamp);
+        assert_eq!(
+            super::time_display::format_delivery_timestamp(Some(timestamp)),
+            timestamp
+        );
     }
 
     #[test]
