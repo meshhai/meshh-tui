@@ -97,6 +97,41 @@ verify_checksum() {
   fi
 }
 
+validate_archive() {
+  archive="$1"
+  expected_dir="$2"
+  expected_binary="$3"
+  entries_file="${archive}.entries"
+  verbose_entries_file="${archive}.verbose_entries"
+
+  tar -tzf "$archive" >"$entries_file" || error "could not list $archive"
+  tar -tvzf "$archive" >"$verbose_entries_file" || error "could not inspect $archive"
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      "" | /* | ../* | */../* | .. | */..)
+        error "unsafe archive entry: $entry"
+        ;;
+    esac
+
+    case "$entry" in
+      "$expected_dir" | "$expected_dir"/*) ;;
+      *) error "unexpected archive entry: $entry" ;;
+    esac
+  done <"$entries_file"
+
+  if ! grep -Fx "$expected_dir/$expected_binary" "$entries_file" >/dev/null 2>&1; then
+    error "release archive did not contain $expected_dir/$expected_binary"
+  fi
+
+  if ! awk -v path="$expected_dir/$expected_binary" '
+    substr($0, 1, 1) == "-" && substr($0, length($0) - length(path) + 1) == path { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$verbose_entries_file"; then
+    error "release archive binary was not a regular file: $expected_dir/$expected_binary"
+  fi
+}
+
 install_binary() {
   source_path="$1"
   dest_dir="$2"
@@ -118,11 +153,13 @@ main() {
   need_command tar
   need_command install
   need_command mktemp
+  need_command awk
 
   target="$(detect_target)"
   version="${MESHH_VERSION:-$(latest_version)}"
   version_number="${version#v}"
   archive_name="meshh_${version_number}_${target}.tar.gz"
+  archive_dir="meshh_${version_number}_${target}"
   base_url="https://github.com/${repo}/releases/download/${version}"
   dest_dir="$(install_dir)"
   tmpdir="$(mktemp -d)"
@@ -136,10 +173,11 @@ main() {
   (
     cd "$tmpdir"
     verify_checksum "$archive_name" "$archive_name.sha256"
-    tar -xzf "$archive_name"
+    validate_archive "$archive_name" "$archive_dir" "$binary"
+    tar -xzf "$archive_name" "$archive_dir/$binary"
   )
 
-  install_binary "$tmpdir/meshh_${version_number}_${target}/$binary" "$dest_dir"
+  install_binary "$tmpdir/$archive_dir/$binary" "$dest_dir"
 
   info "installed $("$dest_dir/$binary" --version)"
   if ! echo ":$PATH:" | grep -q ":$dest_dir:"; then
