@@ -4,6 +4,10 @@
 
 set -eu
 
+LC_ALL=C
+LANG=C
+export LC_ALL LANG
+
 repo="${MESHH_REPO:-meshhai/meshh-tui}"
 binary="meshh"
 

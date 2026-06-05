@@ -16,6 +16,9 @@ fn unix_installer_uses_release_archives_and_verifies_checksums() {
     for expected in [
         "meshhai/meshh-tui",
         "/releases/latest",
+        "LC_ALL=C",
+        "LANG=C",
+        "export LC_ALL LANG",
         "meshh_${version_number}_${target}.tar.gz",
         ".sha256",
         "shasum -a 256 -c",
