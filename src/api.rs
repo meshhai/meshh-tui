@@ -337,7 +337,7 @@ fn approved_device_token_poll(token: String) -> Result<DeviceTokenPoll, ApiError
         })
 }
 
-/// Public delivery identifier exposed by the Meshh destination API.
+/// Public delivery identifier exposed by the MESHH destination API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PublicDeliveryId(String);
 
@@ -866,7 +866,7 @@ pub trait DeliveryApi {
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
 }
 
-/// Configuration needed by Meshh API clients.
+/// Configuration needed by MESHH API clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiClientConfig {
     api_base_url: String,
@@ -897,7 +897,7 @@ impl ApiClientConfig {
     }
 }
 
-/// Meshh API client backed by an injectable HTTP transport.
+/// MESHH API client backed by an injectable HTTP transport.
 #[derive(Debug, Clone)]
 pub struct ApiClient<T = ReqwestTransport> {
     config: ApiClientConfig,
@@ -1089,7 +1089,7 @@ where
     }
 }
 
-/// Minimal HTTP transport surface needed by the Meshh API client.
+/// Minimal HTTP transport surface needed by the MESHH API client.
 pub trait HttpTransport {
     fn post_json(
         &self,
@@ -1299,7 +1299,7 @@ where
     let response = parse_authenticated_success_body(response, operation)?;
 
     serde_json::from_slice(&response).map_err(|source| ApiError::InvalidResponse {
-        message: format!("could not decode Meshh API response while {operation}: {source}"),
+        message: format!("could not decode MESHH API response while {operation}: {source}"),
     })
 }
 
@@ -1349,7 +1349,7 @@ where
     T: DeserializeOwned,
 {
     serde_json::from_slice(response.body()).map_err(|source| ApiError::InvalidResponse {
-        message: format!("could not decode Meshh API response while {operation}: {source}"),
+        message: format!("could not decode MESHH API response while {operation}: {source}"),
     })
 }
 
@@ -1655,7 +1655,7 @@ impl Error for TransportError {
     }
 }
 
-/// Errors produced by Meshh API calls or response decoding.
+/// Errors produced by MESHH API calls or response decoding.
 #[derive(Debug)]
 pub enum ApiError {
     Transport {
@@ -1679,13 +1679,13 @@ pub enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport { .. } => formatter.write_str("network error while contacting Meshh"),
+            Self::Transport { .. } => formatter.write_str("network error while contacting MESHH"),
             Self::Authentication {
                 operation, body, ..
             } if body.is_empty() => {
                 write!(
                     formatter,
-                    "Meshh API rejected the stored token while {operation}"
+                    "MESHH API rejected the stored token while {operation}"
                 )
             }
             Self::Authentication {
@@ -1693,7 +1693,7 @@ impl fmt::Display for ApiError {
             } => {
                 write!(
                     formatter,
-                    "Meshh API rejected the stored token while {operation}: {body}"
+                    "MESHH API rejected the stored token while {operation}: {body}"
                 )
             }
             Self::HttpStatus {
@@ -1703,7 +1703,7 @@ impl fmt::Display for ApiError {
             } if body.is_empty() => {
                 write!(
                     formatter,
-                    "Meshh API returned HTTP {status} while {operation}"
+                    "MESHH API returned HTTP {status} while {operation}"
                 )
             }
             Self::HttpStatus {
@@ -1713,7 +1713,7 @@ impl fmt::Display for ApiError {
             } => {
                 write!(
                     formatter,
-                    "Meshh API returned HTTP {status} while {operation}: {body}"
+                    "MESHH API returned HTTP {status} while {operation}: {body}"
                 )
             }
             Self::InvalidResponse { message } => formatter.write_str(message),

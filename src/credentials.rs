@@ -12,7 +12,7 @@ use crate::config::{ConfigError, default_config_dir};
 
 const CREDENTIALS_FILE_NAME: &str = "credentials.json";
 
-/// Destination-scoped bearer token used by Meshh API calls.
+/// Destination-scoped bearer token used by MESHH API calls.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BearerToken(String);
 
@@ -61,7 +61,7 @@ impl FileCredentialStore {
         }
     }
 
-    /// Creates a credential store under the platform Meshh config directory.
+    /// Creates a credential store under the platform MESHH config directory.
     pub fn new_default() -> Result<Self, CredentialError> {
         Ok(Self::new(default_credentials_path()?))
     }
@@ -235,7 +235,7 @@ impl Error for CredentialError {
     }
 }
 
-/// Returns the platform credentials file path used by Meshh.
+/// Returns the platform credentials file path used by MESHH.
 pub fn default_credentials_path() -> Result<PathBuf, CredentialError> {
     default_config_dir()
         .map(|dir| dir.join(CREDENTIALS_FILE_NAME))

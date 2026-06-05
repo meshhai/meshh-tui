@@ -1143,9 +1143,9 @@ pub enum TuiError {
 impl fmt::Display for TuiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Credential { .. } => formatter.write_str("could not load Meshh credentials"),
+            Self::Credential { .. } => formatter.write_str("could not load MESHH credentials"),
             Self::MissingToken => {
-                formatter.write_str("no Meshh token found; run `meshh login` first")
+                formatter.write_str("no MESHH token found; run `meshh login` first")
             }
             Self::Terminal { .. } => formatter.write_str("terminal UI failed"),
         }

@@ -65,8 +65,8 @@ pub enum LoginError {
 impl fmt::Display for LoginError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Api { .. } => formatter.write_str("could not contact the Meshh login API"),
-            Self::Credential { .. } => formatter.write_str("could not store Meshh credentials"),
+            Self::Api { .. } => formatter.write_str("could not contact the MESHH login API"),
+            Self::Credential { .. } => formatter.write_str("could not store MESHH credentials"),
             Self::Output { .. } => formatter.write_str("could not write login instructions"),
             Self::Denied => formatter.write_str("login was denied in the browser"),
             Self::Expired => formatter.write_str("login expired; run `meshh login` again"),
@@ -94,7 +94,7 @@ impl Error for LoginError {
     }
 }
 
-/// Runs the Meshh device login flow and stores the approved bearer token.
+/// Runs the MESHH device login flow and stores the approved bearer token.
 pub async fn run_device_login<A, S, C, W>(
     api: &A,
     credentials: &S,
@@ -161,7 +161,7 @@ fn write_login_instructions(
     output: &mut impl Write,
     authorization: &DeviceAuthorization,
 ) -> Result<(), LoginError> {
-    writeln!(output, "Approve this terminal in Meshh:")
+    writeln!(output, "Approve this terminal in MESHH:")
         .map_err(|source| LoginError::Output { source })?;
     writeln!(
         output,
