@@ -13,4 +13,4 @@ They are public repo policy, not executable agent prompts or private planning st
 
 ## Acknowledgements
 
-This workflow structure is adapted from the agent workflow used in Meshh projects: keep stable context in `CONTEXT.md` when it exists, durable architecture decisions in ADRs, and focused agent workflows separate from product code.
+This workflow structure is adapted from the agent workflow used in MESHH projects: keep stable context in `CONTEXT.md` when it exists, durable architecture decisions in ADRs, and focused agent workflows separate from product code.

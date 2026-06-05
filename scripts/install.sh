@@ -75,7 +75,7 @@ latest_version() {
 
   case "$final_url" in
     */releases/tag/*) printf '%s\n' "${final_url##*/releases/tag/}" ;;
-    *) error "could not resolve latest Meshh release" ;;
+    *) error "could not resolve latest MESHH release" ;;
   esac
 }
 

@@ -13,7 +13,7 @@ Use GitHub private vulnerability reporting for
 `https://github.com/meshhai/meshh-tui` when available. If private reporting is
 not available, open a public issue asking maintainers to enable a private
 security report, but do not include exploit details, tokens, logs with secrets,
-or private Meshh delivery data.
+or private MESHH delivery data.
 
 Please include:
 

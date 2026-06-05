@@ -7,10 +7,10 @@ use std::{
 
 use serde::Deserialize;
 
-/// Environment variable used to override the Meshh API base URL.
+/// Environment variable used to override the MESHH API base URL.
 pub const ENV_API_BASE_URL: &str = "MESHH_API_BASE_URL";
 
-/// Production Meshh API base URL used when no override is configured.
+/// Production MESHH API base URL used when no override is configured.
 pub const DEFAULT_API_BASE_URL: &str = "https://api.meshh.ai";
 
 const APP_CONFIG_DIR_NAME: &str = "meshh";
@@ -30,7 +30,7 @@ impl RuntimeConfig {
     /// process environment or config file. Use [`RuntimeConfig::load`] for normal CLI startup.
     pub fn from_cli(api_base_url: Option<String>) -> Self {
         Self::resolve(ConfigSources::default().with_cli_api_base_url(api_base_url))
-            .expect("default Meshh API base URL must be non-empty")
+            .expect("default MESHH API base URL must be non-empty")
     }
 
     /// Loads runtime configuration from CLI values, the process environment, and the default
@@ -162,7 +162,7 @@ impl ConfigSources {
     }
 }
 
-/// Parsed Meshh config file.
+/// Parsed MESHH config file.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct FileConfig {
     #[serde(default)]
@@ -276,12 +276,12 @@ impl Error for ConfigError {
     }
 }
 
-/// Returns the platform config directory used by Meshh.
+/// Returns the platform config directory used by MESHH.
 pub fn default_config_dir() -> Result<PathBuf, ConfigError> {
     default_config_dir_from_env()
 }
 
-/// Returns the platform config file path used by Meshh.
+/// Returns the platform config file path used by MESHH.
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
     Ok(default_config_dir()?.join(CONFIG_FILE_NAME))
 }

@@ -2,7 +2,7 @@
 name = "meshh-tui"
 version = "0.1.0"
 edition = "2024"
-description = "Terminal client for Meshh route deliveries"
+description = "Terminal client for MESHH route deliveries"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/meshhai/meshh-tui"
 readme = "README.md"

@@ -45,7 +45,7 @@ For dependency changes, also inspect:
 cargo tree
 ```
 
-If verification cannot run because dependencies, network, credentials, a live Meshh server, or terminal capabilities are unavailable, state the exact command attempted and the blocker.
+If verification cannot run because dependencies, network, credentials, a live MESHH server, or terminal capabilities are unavailable, state the exact command attempted and the blocker.
 
 ## Releases
 

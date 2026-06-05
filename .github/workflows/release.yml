@@ -105,6 +105,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -117,8 +122,22 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          notes_file=".github/release-notes/${tag}.md"
+          notes_args=()
+
+          if [ -f "$notes_file" ]; then
+            notes_args=(--notes-file "$notes_file")
+          else
+            tag_type="$(git cat-file -t "$tag" 2>/dev/null || true)"
+            if [ "$tag_type" != "tag" ]; then
+              echo "::error::Release tags must be annotated or have checked-in notes at $notes_file"
+              exit 1
+            fi
+            notes_args=(--notes-from-tag)
+          fi
+
           gh release create "$tag" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$tag" \
-            --generate-notes \
+            "${notes_args[@]}" \
             --verify-tag

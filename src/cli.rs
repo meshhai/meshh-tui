@@ -11,15 +11,15 @@ use crate::{
     tui,
 };
 
-/// Command-line arguments for the Meshh terminal client.
+/// Command-line arguments for the MESHH terminal client.
 #[derive(Debug, Parser)]
 #[command(
     name = "meshh",
     version,
-    about = "Terminal client for Meshh route deliveries"
+    about = "Terminal client for MESHH route deliveries"
 )]
 pub struct Cli {
-    /// Override the Meshh API base URL for this invocation.
+    /// Override the MESHH API base URL for this invocation.
     #[arg(long, global = true, value_name = "URL")]
     pub api_base_url: Option<String>,
 
@@ -30,7 +30,7 @@ pub struct Cli {
 /// Supported top-level commands.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
-    /// Authenticate this terminal with Meshh.
+    /// Authenticate this terminal with MESHH.
     Login,
 
     /// Open the route delivery terminal UI.

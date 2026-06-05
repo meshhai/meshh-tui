@@ -1,6 +1,6 @@
 # meshh-tui
 
-`meshh-tui` is the Rust terminal client for Meshh route deliveries. The CLI binary is named `meshh`.
+`meshh-tui` is the Rust terminal client for MESHH route deliveries. The CLI binary is named `meshh`.
 
 ## Install
 
@@ -53,12 +53,12 @@ Each archive is published with a matching `.sha256` checksum file.
 
 The first release is planned around two commands:
 
-- `meshh login` authenticates the terminal with Meshh.
+- `meshh login` authenticates the terminal with MESHH.
 - `meshh tui` opens the route delivery terminal UI.
 
-`meshh login` starts Meshh device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed.
+`meshh login` starts MESHH device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed.
 
-`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route delivery view with published time, source, headline, and status columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, published time, source context, source URL, matched routes, and summary/body text when provided. When older Meshh payloads do not include `published_at`, the TUI falls back to the source `detected_at` timestamp.
+`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route delivery view with published time, source, headline, and status columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, published time, source context, source URL, matched routes, and summary/body text when provided. When older MESHH payloads do not include `published_at`, the TUI falls back to the source `detected_at` timestamp.
 
 ## Terminal Example
 
@@ -66,7 +66,7 @@ The example below uses sample delivery data.
 
 ```text
 $ meshh login
-Approve this terminal in Meshh:
+Approve this terminal in MESHH:
 Verification URL: https://meshh.example/device
 User code: ABCD-EFGH
 Waiting for approval...
@@ -115,7 +115,7 @@ The config file is JSON and supports `api_base_url`:
 }
 ```
 
-Meshh stores local config under the platform config directory, such as
+MESHH stores local config under the platform config directory, such as
 `~/Library/Application Support/meshh/config.json` on macOS,
 `~/.config/meshh/config.json` on Linux, and `%APPDATA%\meshh\config.json`
 on Windows.
