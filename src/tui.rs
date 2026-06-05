@@ -213,6 +213,23 @@ fn spawn_stream_worker<A>(
 where
     A: DeliveryApi + Send + Sync + 'static,
 {
+    spawn_stream_worker_with_reconnect_interval(
+        api,
+        token,
+        initial_after,
+        STREAM_RECONNECT_INTERVAL,
+    )
+}
+
+fn spawn_stream_worker_with_reconnect_interval<A>(
+    api: A,
+    token: BearerToken,
+    initial_after: Option<StreamCursor>,
+    reconnect_interval: Duration,
+) -> mpsc::Receiver<StreamWorkerMessage>
+where
+    A: DeliveryApi + Send + Sync + 'static,
+{
     let (sender, receiver) = mpsc::channel();
 
     tokio::spawn(async move {
@@ -243,7 +260,7 @@ where
                         break;
                     }
 
-                    tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
+                    tokio::time::sleep(reconnect_interval).await;
                 }
                 Err(error) => {
                     let is_authentication_error = matches!(error, ApiError::Authentication { .. });
@@ -256,7 +273,7 @@ where
                         break;
                     }
 
-                    tokio::time::sleep(STREAM_RECONNECT_INTERVAL).await;
+                    tokio::time::sleep(reconnect_interval).await;
                 }
             }
         }
@@ -767,10 +784,11 @@ mod tests {
             }]),
             StreamResponse::AuthError,
         ]);
-        let receiver = super::spawn_stream_worker(
+        let receiver = super::spawn_stream_worker_with_reconnect_interval(
             api.clone(),
             BearerToken::new("destination-token").unwrap(),
             Some(StreamCursor::new("cur_01").unwrap()),
+            Duration::from_millis(1),
         );
 
         match recv_stream_message(&receiver).await {
@@ -804,10 +822,11 @@ mod tests {
             )]),
             StreamResponse::AuthError,
         ]);
-        let receiver = super::spawn_stream_worker(
+        let receiver = super::spawn_stream_worker_with_reconnect_interval(
             api.clone(),
             BearerToken::new("destination-token").unwrap(),
             Some(StreamCursor::new("cur_01").unwrap()),
+            Duration::from_millis(1),
         );
 
         match recv_stream_message(&receiver).await {
