@@ -17,6 +17,7 @@ fn release_workflow_builds_smoke_tests_and_publishes_archives() {
     for expected in [
         "tags:",
         "\"v*\"",
+        "macos-15-intel",
         "x86_64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
