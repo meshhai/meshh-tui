@@ -692,7 +692,7 @@ mod tests {
         assert!(error.message().contains("stored token"));
 
         let rendered = render_text(&state);
-        assert!(rendered.contains("meshh-tui v0.1.0"));
+        assert!(rendered.contains(&format!("meshh-tui v{}", env!("CARGO_PKG_VERSION"))));
         assert!(rendered.contains("Authentication error"));
         assert!(rendered.contains("2 rows"));
         assert!(!rendered.contains("resume:"));
@@ -771,7 +771,10 @@ mod tests {
 
         let rendered = render_text(&state);
 
-        assert!(rendered.contains("meshh-tui v0.1.0 | reconnecting: Network error"));
+        assert!(rendered.contains(&format!(
+            "meshh-tui v{} | reconnecting: Network error",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(rendered.contains("network error"));
     }
 
@@ -913,7 +916,10 @@ mod tests {
         );
 
         let list_text = render_text(&state);
-        assert!(list_text.contains("meshh-tui v0.1.0 | offline | 1 row | row 1/1"));
+        assert!(list_text.contains(&format!(
+            "meshh-tui v{} | offline | 1 row | row 1/1",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(!list_text.contains("resume:"));
         assert!(!list_text.contains("history:"));
         assert!(list_text.contains("CPU alert routed to ops"));
