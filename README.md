@@ -4,17 +4,50 @@
 
 ## Install
 
-Build the current development binary with Cargo:
+Install the latest macOS or Linux release:
 
 ```sh
-cargo build
+curl -fsSL https://raw.githubusercontent.com/meshhai/meshh-tui/master/scripts/install.sh | sh
 ```
 
-Run the top-level help:
+The installer downloads the matching GitHub Release archive, verifies its
+`.sha256` checksum, and installs the `meshh` binary. Set `MESHH_INSTALL_DIR` to
+choose the install directory, or `MESHH_VERSION=v0.1.0` to install a specific
+release.
+
+Install from source with Cargo:
 
 ```sh
-cargo run -- --help
+cargo install --git https://github.com/meshhai/meshh-tui --bin meshh
 ```
+
+Or download a release archive from GitHub Releases. Replace `0.1.0` with the
+version you want to install:
+
+```sh
+# macOS arm64 example
+curl -L https://github.com/meshhai/meshh-tui/releases/download/v0.1.0/meshh_0.1.0_aarch64-apple-darwin.tar.gz -o meshh.tar.gz
+tar -xzf meshh.tar.gz
+install -m 0755 meshh_0.1.0_aarch64-apple-darwin/meshh /usr/local/bin/meshh
+```
+
+For local development builds:
+
+```sh
+cargo install --path . --bin meshh
+meshh --help
+```
+
+Release archives are named by version and target triple:
+
+```text
+meshh_0.1.0_aarch64-apple-darwin.tar.gz
+meshh_0.1.0_x86_64-apple-darwin.tar.gz
+meshh_0.1.0_x86_64-unknown-linux-gnu.tar.gz
+meshh_0.1.0_x86_64-pc-windows-msvc.zip
+```
+
+Each archive is published with a matching `.sha256` checksum file.
 
 ## Commands
 
@@ -25,7 +58,7 @@ The first release is planned around two commands:
 
 `meshh login` starts Meshh device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed.
 
-`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route-feed view with published time, source, headline, and status columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, published time, source context, source URL, matched routes, and summary/body text when provided. When older Meshh payloads do not include `published_at`, the TUI falls back to the source `detected_at` timestamp.
+`meshh tui` loads the stored token, fetches recent destination deliveries, and opens a dense route delivery view with published time, source, headline, and status columns. It keeps the delivery stream connected in the background, inserts new route deliveries at the top of the list, and reconnects with the latest stream cursor after network interruptions. Select rows with Up/Down or `j`/`k`, open detail with Enter or `o`, refresh with `r`, go back with `b`/Esc, and quit with `q` or Ctrl-C. Detail view shows the headline, status, published time, source context, source URL, matched routes, and summary/body text when provided. When older Meshh payloads do not include `published_at`, the TUI falls back to the source `detected_at` timestamp.
 
 ## Terminal Example
 
