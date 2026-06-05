@@ -527,7 +527,7 @@ impl DeliveryListItem {
         &self.status
     }
 
-    /// Returns the API timestamp string for route-feed publication time, when provided.
+    /// Returns the API timestamp string for route delivery publication time, when provided.
     pub fn published_at(&self) -> Option<&str> {
         self.published_at.as_deref()
     }
@@ -638,7 +638,7 @@ impl DeliveryDetail {
         &self.status
     }
 
-    /// Returns the API timestamp string for route-feed publication time, when provided.
+    /// Returns the API timestamp string for route delivery publication time, when provided.
     pub fn published_at(&self) -> Option<&str> {
         self.published_at.as_deref()
     }

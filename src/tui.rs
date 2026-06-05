@@ -36,9 +36,9 @@ pub enum Screen {
     },
 }
 
-/// List feed state visible to the user.
+/// Delivery list state visible to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FeedStatus {
+pub enum DeliveryListStatus {
     Loading,
     Ready,
     Empty,
@@ -147,7 +147,7 @@ pub enum AppCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     screen: Screen,
-    feed_status: FeedStatus,
+    delivery_list_status: DeliveryListStatus,
     stream_status: StreamStatus,
     deliveries: Vec<DeliveryListItem>,
     selected_index: Option<usize>,
@@ -164,7 +164,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             screen: Screen::DeliveryList,
-            feed_status: FeedStatus::Loading,
+            delivery_list_status: DeliveryListStatus::Loading,
             stream_status: StreamStatus::Disconnected,
             deliveries: Vec::new(),
             selected_index: None,
@@ -185,9 +185,9 @@ impl AppState {
         &self.screen
     }
 
-    /// Returns the current list feed status.
-    pub fn feed_status(&self) -> &FeedStatus {
-        &self.feed_status
+    /// Returns the current delivery list status.
+    pub fn delivery_list_status(&self) -> &DeliveryListStatus {
+        &self.delivery_list_status
     }
 
     /// Returns the live delivery stream status.
@@ -231,10 +231,10 @@ impl AppState {
         self.detail.as_ref()
     }
 
-    /// Moves the list feed into a loading state.
+    /// Moves the delivery list into a loading state.
     pub fn start_loading(&mut self) {
         self.screen = Screen::DeliveryList;
-        self.feed_status = FeedStatus::Loading;
+        self.delivery_list_status = DeliveryListStatus::Loading;
         self.detail_status = DetailStatus::Hidden;
         self.detail = None;
         self.list_request_generation = self.list_request_generation.saturating_add(1);
@@ -255,10 +255,10 @@ impl AppState {
         };
         self.next_cursor = page.next_cursor().cloned();
         self.track_page_cursors();
-        self.feed_status = if self.deliveries.is_empty() {
-            FeedStatus::Empty
+        self.delivery_list_status = if self.deliveries.is_empty() {
+            DeliveryListStatus::Empty
         } else {
-            FeedStatus::Ready
+            DeliveryListStatus::Ready
         };
     }
 
@@ -268,7 +268,7 @@ impl AppState {
             return;
         }
 
-        self.feed_status = FeedStatus::Error(AppError::from_api_error(error));
+        self.delivery_list_status = DeliveryListStatus::Error(AppError::from_api_error(error));
         self.clamp_selection();
     }
 
@@ -302,10 +302,10 @@ impl AppState {
         }
 
         if inserted_delivery {
-            self.feed_status = if self.deliveries.is_empty() {
-                FeedStatus::Empty
+            self.delivery_list_status = if self.deliveries.is_empty() {
+                DeliveryListStatus::Empty
             } else {
-                FeedStatus::Ready
+                DeliveryListStatus::Ready
             };
         }
 
@@ -795,7 +795,9 @@ fn ensure_stream_started<A>(
 ) where
     A: DeliveryApi + Clone + Send + Sync + 'static,
 {
-    if stream_events.is_none() && !matches!(state.feed_status(), FeedStatus::Loading) {
+    if stream_events.is_none()
+        && !matches!(state.delivery_list_status(), DeliveryListStatus::Loading)
+    {
         state.start_stream();
         *stream_events = Some(spawn_stream_worker(
             api.clone(),
@@ -915,10 +917,12 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
 }
 
 fn header_activity(state: &AppState) -> String {
-    match state.feed_status() {
-        FeedStatus::Loading => "loading".to_owned(),
-        FeedStatus::Error(error) => error.heading().to_owned(),
-        FeedStatus::Empty | FeedStatus::Ready => stream_activity(state.stream_status()),
+    match state.delivery_list_status() {
+        DeliveryListStatus::Loading => "loading".to_owned(),
+        DeliveryListStatus::Error(error) => error.heading().to_owned(),
+        DeliveryListStatus::Empty | DeliveryListStatus::Ready => {
+            stream_activity(state.stream_status())
+        }
     }
 }
 
@@ -951,7 +955,7 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
 
     let rows = state.deliveries().iter().map(|item| {
         Row::new(vec![
-            Cell::from(format_feed_timestamp(item.display_timestamp())),
+            Cell::from(format_delivery_timestamp(item.display_timestamp())),
             Cell::from(item.source_context().unwrap_or("-").to_owned()),
             Cell::from(item.headline().to_owned()),
             Cell::from(item.status().as_str().to_owned()),
@@ -993,10 +997,10 @@ fn render_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
 }
 
 fn empty_list_message(state: &AppState) -> &str {
-    match state.feed_status() {
-        FeedStatus::Loading => "Loading route deliveries...",
-        FeedStatus::Error(error) => error.message(),
-        FeedStatus::Empty | FeedStatus::Ready => match state.stream_status() {
+    match state.delivery_list_status() {
+        DeliveryListStatus::Loading => "Loading route deliveries...",
+        DeliveryListStatus::Error(error) => error.message(),
+        DeliveryListStatus::Empty | DeliveryListStatus::Ready => match state.stream_status() {
             StreamStatus::Reconnecting(error) | StreamStatus::Error(error) => error.message(),
             _other => "No route deliveries yet.",
         },
@@ -1053,7 +1057,7 @@ fn detail_text(detail: Option<&DeliveryDetail>) -> Text<'static> {
         Line::from(format!("Status: {}", detail.status().as_str())),
         Line::from(format!(
             "Published: {}",
-            format_feed_timestamp(detail.display_timestamp())
+            format_delivery_timestamp(detail.display_timestamp())
         )),
         Line::from(format!(
             "Source: {}",
@@ -1069,7 +1073,7 @@ fn detail_text(detail: Option<&DeliveryDetail>) -> Text<'static> {
     ])
 }
 
-fn format_feed_timestamp(timestamp: Option<&str>) -> String {
+fn format_delivery_timestamp(timestamp: Option<&str>) -> String {
     let Some(timestamp) = timestamp else {
         return "-".to_owned();
     };
@@ -1161,7 +1165,7 @@ impl Error for TuiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppCommand, AppErrorKind, AppState, DetailStatus, FeedStatus, KeyAction, Screen,
+        AppCommand, AppErrorKind, AppState, DeliveryListStatus, DetailStatus, KeyAction, Screen,
         StreamStatus,
     };
     use crate::api::{
@@ -1177,7 +1181,7 @@ mod tests {
         let mut state = AppState::default();
 
         state.start_loading();
-        assert_eq!(state.feed_status(), &FeedStatus::Loading);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Loading);
 
         apply_page(
             &mut state,
@@ -1190,7 +1194,7 @@ mod tests {
             ),
         );
 
-        assert_eq!(state.feed_status(), &FeedStatus::Ready);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Ready);
         assert_eq!(state.deliveries().len(), 2);
         assert_eq!(state.deliveries()[0].headline(), "CPU alert routed to ops");
         assert_eq!(state.deliveries()[0].source_context(), Some("Datadog"));
@@ -1269,7 +1273,7 @@ mod tests {
                 generation: state.list_request_generation
             }
         );
-        assert_eq!(state.feed_status(), &FeedStatus::Loading);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Loading);
         assert_eq!(state.handle_key_action(KeyAction::Quit), AppCommand::Quit);
     }
 
@@ -1293,7 +1297,7 @@ mod tests {
             .unwrap();
         super::drain_load_events(&mut state, &receiver);
 
-        assert_eq!(state.feed_status(), &FeedStatus::Loading);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Loading);
         assert!(state.deliveries().is_empty());
 
         sender
@@ -1307,7 +1311,7 @@ mod tests {
             .unwrap();
         super::drain_load_events(&mut state, &receiver);
 
-        assert_eq!(state.feed_status(), &FeedStatus::Ready);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Ready);
         assert_eq!(state.deliveries()[0].headline(), "New result");
     }
 
@@ -1452,20 +1456,20 @@ mod tests {
     }
 
     #[test]
-    fn connected_stream_frame_marks_empty_feed_live() {
+    fn connected_stream_frame_marks_empty_delivery_list_live() {
         let mut state = AppState::default();
         apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
         state.start_stream();
 
         state.receive_stream_frames(vec![DeliveryStreamFrame::Connected]);
 
-        assert_eq!(state.feed_status(), &FeedStatus::Empty);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Empty);
         assert_eq!(state.stream_status(), &StreamStatus::Live);
         assert!(state.deliveries().is_empty());
     }
 
     #[test]
-    fn stream_metadata_frames_do_not_hide_feed_load_errors() {
+    fn stream_metadata_frames_do_not_hide_delivery_list_load_errors() {
         let mut state = AppState::default();
         apply_list_error(
             &mut state,
@@ -1480,8 +1484,8 @@ mod tests {
             DeliveryStreamFrame::Cursor(StreamCursor::new("cur_01").unwrap()),
         ]);
 
-        let FeedStatus::Error(error) = state.feed_status() else {
-            panic!("expected feed error to remain visible");
+        let DeliveryListStatus::Error(error) = state.delivery_list_status() else {
+            panic!("expected delivery list error to remain visible");
         };
         assert_eq!(error.kind(), AppErrorKind::Network);
         assert_eq!(state.stream_status(), &StreamStatus::Live);
@@ -1489,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_feed_surfaces_stream_errors() {
+    fn empty_delivery_list_surfaces_stream_errors() {
         let mut state = AppState::default();
         apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
 
@@ -1583,7 +1587,7 @@ mod tests {
         let mut state = AppState::default();
 
         apply_page(&mut state, DeliveryListPage::new(Vec::new(), None));
-        assert_eq!(state.feed_status(), &FeedStatus::Empty);
+        assert_eq!(state.delivery_list_status(), &DeliveryListStatus::Empty);
         assert_eq!(state.selected_index(), None);
 
         apply_list_error(
@@ -1595,7 +1599,7 @@ mod tests {
             },
         );
 
-        let FeedStatus::Error(error) = state.feed_status() else {
+        let DeliveryListStatus::Error(error) = state.delivery_list_status() else {
             panic!("expected auth list error");
         };
         assert_eq!(error.kind(), AppErrorKind::Authentication);
@@ -1663,7 +1667,7 @@ mod tests {
     fn timestamp_formatting_falls_back_for_non_ascii_malformed_input() {
         let timestamp = "2026é6-04T19:09:00Z";
 
-        assert_eq!(super::format_feed_timestamp(Some(timestamp)), timestamp);
+        assert_eq!(super::format_delivery_timestamp(Some(timestamp)), timestamp);
     }
 
     #[test]
