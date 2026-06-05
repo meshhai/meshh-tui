@@ -76,24 +76,24 @@ $ meshh tui
 meshh-tui v0.1.0 | live | 3 rows | row 1/3
 +------------------------------------------------------------------------------+
 |Published    Source             Headline                              Status    |
-|> Jun 04 19:09 Datadog            CPU alert routed to ops               delivered |
-|  Jun 04 18:58 GitHub             Deploy complete                       delivered |
-|  Jun 04 18:42 Stripe             Invoice threshold matched             delivered |
+|> Jun 04 19:09 FED            FOMC statement shifts risk balance    delivered |
+|  Jun 04 18:58 RBA            Minutes point to inflation caution    delivered |
+|  Jun 04 18:42 BOJ            Market operation notice published     delivered |
 +------------------------------------------------------------------------------+
 up/down select | enter open | r refresh | q quit
 
 Enter
 
 +------------------------------------------------------------------------------+
-|CPU alert routed to ops                                                       |
+|FOMC statement shifts risk balance                                            |
 |                                                                              |
 |Status: delivered                                                             |
 |Published: Jun 04 19:09                                                       |
-|Source: Datadog                                                               |
-|Source URL: https://alerts.example/cpu-alert                                  |
-|Matched routes: Ops Escalation                                                |
+|Source: FED                                                                   |
+|Source URL: https://www.federalreserve.gov/monetarypolicy                     |
+|Matched routes: Central Bank Watch                                            |
 |                                                                              |
-|A production route matched this delivery.                                     |
+|A central bank route matched this delivery for market review.                 |
 +------------------------------------------------------------------------------+
 b back | r reload detail | q quit
 ```
