@@ -90,7 +90,7 @@ async fn run_update_command(check_only: bool, yes: bool) -> Result<()> {
         }
     }
 
-    update::run_installer(install_dir).await?;
+    update::install_checked_release(&check, install_dir).await?;
 
     Ok(())
 }

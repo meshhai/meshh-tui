@@ -2,19 +2,19 @@ use std::{
     cmp::Ordering,
     error::Error,
     fmt, fs, io,
-    io::Write,
-    path::PathBuf,
-    process::{Command, Stdio},
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus},
     time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigError, default_config_dir};
 
 const DEFAULT_REPO: &str = "meshhai/meshh-tui";
-const INSTALL_SCRIPT_URL: &str =
-    "https://raw.githubusercontent.com/meshhai/meshh-tui/master/scripts/install.sh";
+const BINARY_NAME: &str = "meshh";
 const UPDATE_CACHE_FILE_NAME: &str = "update-check.json";
 const UPDATE_CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
@@ -52,6 +52,7 @@ pub struct UpdateCheck {
     current_version: String,
     latest_version: String,
     html_url: Option<String>,
+    package: Option<ReleasePackage>,
     update_available: bool,
 }
 
@@ -60,6 +61,7 @@ impl UpdateCheck {
         current_version: impl Into<String>,
         latest_version: impl Into<String>,
         html_url: Option<String>,
+        package: Option<ReleasePackage>,
     ) -> Self {
         let current_version = current_version.into();
         let latest_version = latest_version.into();
@@ -69,8 +71,15 @@ impl UpdateCheck {
             current_version,
             latest_version,
             html_url,
+            package,
             update_available,
         }
+    }
+
+    fn from_latest_release(current_version: impl Into<String>, latest: LatestRelease) -> Self {
+        let package = select_release_package(&latest);
+
+        Self::new(current_version, latest.tag_name, latest.html_url, package)
     }
 
     /// Returns the running client version.
@@ -91,6 +100,11 @@ impl UpdateCheck {
     /// Returns whether the latest release is newer than the running version.
     pub fn update_available(&self) -> bool {
         self.update_available
+    }
+
+    /// Returns the release package for the current platform, when the release publishes one.
+    fn package(&self) -> Option<&ReleasePackage> {
+        self.package.as_ref()
     }
 
     /// Converts an available update into a TUI notice.
@@ -118,10 +132,9 @@ pub async fn check_for_update_with_cache() -> Result<Option<UpdateNotice>, Updat
 pub async fn check_for_update() -> Result<UpdateCheck, UpdateError> {
     let latest = fetch_latest_release(DEFAULT_REPO).await?;
 
-    Ok(UpdateCheck::new(
+    Ok(UpdateCheck::from_latest_release(
         current_version_tag(),
-        latest.tag_name,
-        latest.html_url,
+        latest,
     ))
 }
 
@@ -154,27 +167,36 @@ pub fn current_install_dir() -> Result<PathBuf, UpdateError> {
         .ok_or(UpdateError::MissingInstallDirectory)
 }
 
-/// Runs the checked release installer into the provided install directory.
-pub async fn run_installer(install_dir: PathBuf) -> Result<(), UpdateError> {
-    let script = download_install_script().await?;
-    let mut child = Command::new("sh")
-        .env("MESHH_INSTALL_DIR", install_dir)
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(UpdateError::RunInstaller)?;
+/// Installs the checked latest release into the provided install directory.
+pub async fn install_checked_release(
+    check: &UpdateCheck,
+    install_dir: PathBuf,
+) -> Result<(), UpdateError> {
+    let target = release_target()?.triple;
+    let package = check
+        .package()
+        .ok_or_else(|| UpdateError::MissingReleaseAsset {
+            version: check.latest_version.clone(),
+            target,
+        })?;
+    let temp_dir = TempDir::create("meshh-update")?;
+    let archive_path = temp_dir.path().join(&package.archive_name);
+    let checksum_path = temp_dir.path().join(&package.checksum_name);
 
-    child
-        .stdin
-        .as_mut()
-        .ok_or(UpdateError::InstallerStdin)?
-        .write_all(script.as_bytes())
-        .map_err(UpdateError::WriteInstaller)?;
+    let archive = download_bytes(&package.archive_url).await?;
+    let checksum = download_text(&package.checksum_url).await?;
+    let expected_hash = parse_checksum(&checksum, &package.archive_name)?;
+    verify_sha256(&archive, &expected_hash)?;
 
-    let status = child.wait().map_err(UpdateError::RunInstaller)?;
+    fs::write(&archive_path, archive).map_err(UpdateError::WriteUpdateFile)?;
+    fs::write(&checksum_path, checksum).map_err(UpdateError::WriteUpdateFile)?;
 
-    if !status.success() {
-        return Err(UpdateError::InstallerFailed { status });
-    }
+    validate_archive(&archive_path, &package.archive_dir)?;
+    extract_archive_binary(&archive_path, &package.archive_dir, temp_dir.path())?;
+    install_binary(
+        &temp_dir.path().join(&package.archive_dir).join(BINARY_NAME),
+        &install_dir,
+    )?;
 
     Ok(())
 }
@@ -208,28 +230,326 @@ async fn fetch_latest_release(repo: &str) -> Result<LatestRelease, UpdateError> 
     response.json().await.map_err(UpdateError::DecodeRelease)
 }
 
-async fn download_install_script() -> Result<String, UpdateError> {
+fn select_release_package(release: &LatestRelease) -> Option<ReleasePackage> {
+    let target = release_target().ok()?;
+    let version_number = release.tag_name.trim_start_matches('v');
+    let archive_name = format!("meshh_{version_number}_{}.tar.gz", target.triple);
+    let checksum_name = format!("{archive_name}.sha256");
+    let archive_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == archive_name)?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == checksum_name)?;
+
+    Some(ReleasePackage {
+        archive_name,
+        archive_url: archive_asset.browser_download_url.clone(),
+        checksum_name,
+        checksum_url: checksum_asset.browser_download_url.clone(),
+        archive_dir: format!("meshh_{version_number}_{}", target.triple),
+    })
+}
+
+fn release_target() -> Result<ReleaseTarget, UpdateError> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let triple = match (os, arch) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        _ => {
+            return Err(UpdateError::UnsupportedTarget {
+                os: os.to_owned(),
+                arch: arch.to_owned(),
+            });
+        }
+    };
+
+    Ok(ReleaseTarget {
+        triple: triple.to_owned(),
+    })
+}
+
+async fn download_bytes(url: &str) -> Result<Vec<u8>, UpdateError> {
     let response = reqwest::Client::new()
-        .get(INSTALL_SCRIPT_URL)
+        .get(url)
         .header(
             reqwest::header::USER_AGENT,
             format!("meshh-tui/{}", env!("CARGO_PKG_VERSION")),
         )
         .send()
         .await
-        .map_err(UpdateError::DownloadInstaller)?;
+        .map_err(UpdateError::DownloadReleaseAsset)?;
 
     let status = response.status();
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(UpdateError::InstallerDownloadStatus {
+        return Err(UpdateError::ReleaseAssetStatus {
             status: status.as_u16(),
             body: clipped(&body),
         });
     }
 
-    response.text().await.map_err(UpdateError::ReadInstaller)
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(UpdateError::ReadReleaseAsset)
+}
+
+async fn download_text(url: &str) -> Result<String, UpdateError> {
+    let bytes = download_bytes(url).await?;
+
+    String::from_utf8(bytes).map_err(UpdateError::DecodeReleaseAsset)
+}
+
+fn parse_checksum(contents: &str, archive_name: &str) -> Result<String, UpdateError> {
+    let mut fields = contents.split_whitespace();
+    let Some(hash) = fields.next() else {
+        return Err(UpdateError::InvalidChecksum {
+            message: "checksum file was empty".to_owned(),
+        });
+    };
+
+    if hash.len() != 64 || !hash.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(UpdateError::InvalidChecksum {
+            message: "checksum file did not start with a SHA256 hex digest".to_owned(),
+        });
+    }
+
+    if let Some(path) = fields.next() {
+        let path = path.trim_start_matches('*');
+        let name_matches = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == archive_name);
+
+        if !name_matches {
+            return Err(UpdateError::InvalidChecksum {
+                message: format!("checksum file referenced unexpected archive `{path}`"),
+            });
+        }
+    }
+
+    Ok(hash.to_ascii_lowercase())
+}
+
+fn verify_sha256(bytes: &[u8], expected_hash: &str) -> Result<(), UpdateError> {
+    let actual_hash = hex_sha256(bytes);
+
+    if actual_hash != expected_hash {
+        return Err(UpdateError::ChecksumMismatch {
+            expected: expected_hash.to_owned(),
+            actual: actual_hash,
+        });
+    }
+
+    Ok(())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+
+    output
+}
+
+fn validate_archive(archive_path: &Path, expected_dir: &str) -> Result<(), UpdateError> {
+    let entries_output = run_command_capture(
+        Command::new("tar").arg("-tzf").arg(archive_path),
+        "listing release archive",
+    )?;
+    let entries = String::from_utf8(entries_output).map_err(UpdateError::DecodeCommandOutput)?;
+
+    for entry in entries.lines() {
+        if !safe_archive_entry(entry, expected_dir) {
+            return Err(UpdateError::UnsafeArchiveEntry {
+                entry: entry.to_owned(),
+            });
+        }
+    }
+
+    let binary_entry = format!("{expected_dir}/{BINARY_NAME}");
+    if !entries.lines().any(|entry| entry == binary_entry) {
+        return Err(UpdateError::MissingArchiveBinary { path: binary_entry });
+    }
+
+    let verbose_output = run_command_capture(
+        Command::new("tar").arg("-tvzf").arg(archive_path),
+        "inspecting release archive",
+    )?;
+    let verbose = String::from_utf8(verbose_output).map_err(UpdateError::DecodeCommandOutput)?;
+
+    if !verbose.lines().any(|line| {
+        line.starts_with('-')
+            && line
+                .strip_suffix(&format!(" {expected_dir}/{BINARY_NAME}"))
+                .is_some()
+    }) {
+        return Err(UpdateError::ArchiveBinaryNotRegular {
+            path: format!("{expected_dir}/{BINARY_NAME}"),
+        });
+    }
+
+    Ok(())
+}
+
+fn safe_archive_entry(entry: &str, expected_dir: &str) -> bool {
+    !entry.is_empty()
+        && !entry.starts_with('/')
+        && entry != ".."
+        && !entry.starts_with("../")
+        && !entry.ends_with("/..")
+        && !entry.contains("/../")
+        && (entry == expected_dir || entry.starts_with(&format!("{expected_dir}/")))
+}
+
+fn extract_archive_binary(
+    archive_path: &Path,
+    archive_dir: &str,
+    output_dir: &Path,
+) -> Result<(), UpdateError> {
+    let binary_entry = format!("{archive_dir}/{BINARY_NAME}");
+    run_command(
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(archive_path)
+            .arg("-C")
+            .arg(output_dir)
+            .arg(&binary_entry),
+        "extracting release archive",
+    )?;
+
+    let binary_path = output_dir.join(binary_entry);
+    let metadata = fs::metadata(&binary_path).map_err(UpdateError::ReadUpdateFile)?;
+
+    if !metadata.is_file() {
+        return Err(UpdateError::ArchiveBinaryNotRegular {
+            path: binary_path.display().to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn install_binary(source_path: &Path, install_dir: &Path) -> Result<(), UpdateError> {
+    fs::create_dir_all(install_dir).map_err(UpdateError::InstallDirectory)?;
+    let destination_path = install_dir.join(BINARY_NAME);
+    let status = Command::new("install")
+        .arg("-m")
+        .arg("0755")
+        .arg(source_path)
+        .arg(&destination_path)
+        .status()
+        .map_err(UpdateError::InstallBinary)?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    if command_exists("sudo") {
+        run_command(
+            Command::new("sudo")
+                .arg("install")
+                .arg("-m")
+                .arg("0755")
+                .arg(source_path)
+                .arg(&destination_path),
+            "installing release binary with sudo",
+        )?;
+
+        return Ok(());
+    }
+
+    Err(UpdateError::InstallFailed { status })
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn run_command(command: &mut Command, operation: &'static str) -> Result<(), UpdateError> {
+    let status = command
+        .status()
+        .map_err(|source| UpdateError::Command { operation, source })?;
+
+    if !status.success() {
+        return Err(UpdateError::CommandStatus { operation, status });
+    }
+
+    Ok(())
+}
+
+fn run_command_capture(
+    command: &mut Command,
+    operation: &'static str,
+) -> Result<Vec<u8>, UpdateError> {
+    let output = command
+        .output()
+        .map_err(|source| UpdateError::Command { operation, source })?;
+
+    if !output.status.success() {
+        return Err(UpdateError::CommandStatus {
+            operation,
+            status: output.status,
+        });
+    }
+
+    Ok(output.stdout)
+}
+
+#[derive(Debug)]
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn create(prefix: &str) -> Result<Self, UpdateError> {
+        let base = std::env::temp_dir();
+
+        for attempt in 0..100 {
+            let unique = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = base.join(format!("{prefix}-{unique}-{attempt}"));
+
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(source) if source.kind() == ErrorKind::AlreadyExists => {}
+                Err(source) => return Err(UpdateError::CreateTempDir(source)),
+            }
+        }
+
+        Err(UpdateError::CreateTempDir(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "could not create unique temporary update directory",
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 fn default_update_cache_path() -> Result<PathBuf, UpdateError> {
@@ -259,6 +579,7 @@ fn read_fresh_cached_check(path: &PathBuf) -> Result<Option<UpdateCheck>, Update
         current_version_tag(),
         cache.latest_version,
         cache.html_url,
+        None,
     )))
 }
 
@@ -319,17 +640,40 @@ fn version_components(version: &str) -> Option<Vec<u64>> {
 fn clipped(value: &str) -> String {
     const MAX: usize = 500;
 
-    if value.len() <= MAX {
+    if value.chars().count() <= MAX {
         return value.to_owned();
     }
 
-    format!("{}...", &value[..MAX])
+    let clipped = value.chars().take(MAX).collect::<String>();
+    format!("{clipped}...")
 }
 
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
     tag_name: String,
     html_url: Option<String>,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleasePackage {
+    archive_name: String,
+    archive_url: String,
+    checksum_name: String,
+    checksum_url: String,
+    archive_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseTarget {
+    triple: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -342,8 +686,15 @@ struct CachedUpdateCheck {
 #[derive(Debug)]
 pub enum UpdateError {
     Config(ConfigError),
+    UnsupportedTarget {
+        os: String,
+        arch: String,
+    },
     CheckRequest(reqwest::Error),
-    CheckStatus { status: u16, body: String },
+    CheckStatus {
+        status: u16,
+        body: String,
+    },
     DecodeRelease(reqwest::Error),
     Output(io::Error),
     ReadCache(io::Error),
@@ -352,19 +703,59 @@ pub enum UpdateError {
     WriteCache(io::Error),
     CurrentExecutable(io::Error),
     MissingInstallDirectory,
-    DownloadInstaller(reqwest::Error),
-    InstallerDownloadStatus { status: u16, body: String },
-    ReadInstaller(reqwest::Error),
-    RunInstaller(io::Error),
-    InstallerStdin,
-    WriteInstaller(io::Error),
-    InstallerFailed { status: std::process::ExitStatus },
+    MissingReleaseAsset {
+        version: String,
+        target: String,
+    },
+    CreateTempDir(io::Error),
+    DownloadReleaseAsset(reqwest::Error),
+    ReleaseAssetStatus {
+        status: u16,
+        body: String,
+    },
+    ReadReleaseAsset(reqwest::Error),
+    DecodeReleaseAsset(std::string::FromUtf8Error),
+    InvalidChecksum {
+        message: String,
+    },
+    ChecksumMismatch {
+        expected: String,
+        actual: String,
+    },
+    WriteUpdateFile(io::Error),
+    ReadUpdateFile(io::Error),
+    DecodeCommandOutput(std::string::FromUtf8Error),
+    UnsafeArchiveEntry {
+        entry: String,
+    },
+    MissingArchiveBinary {
+        path: String,
+    },
+    ArchiveBinaryNotRegular {
+        path: String,
+    },
+    InstallDirectory(io::Error),
+    InstallBinary(io::Error),
+    InstallFailed {
+        status: ExitStatus,
+    },
+    Command {
+        operation: &'static str,
+        source: io::Error,
+    },
+    CommandStatus {
+        operation: &'static str,
+        status: ExitStatus,
+    },
 }
 
 impl fmt::Display for UpdateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(source) => write!(formatter, "{source}"),
+            Self::UnsupportedTarget { os, arch } => {
+                write!(formatter, "unsupported update target: {os}-{arch}")
+            }
             Self::CheckRequest(source) => {
                 write!(formatter, "could not check for updates: {source}")
             }
@@ -395,25 +786,81 @@ impl fmt::Display for UpdateError {
             Self::MissingInstallDirectory => {
                 formatter.write_str("could not determine current install directory")
             }
-            Self::DownloadInstaller(source) => {
-                write!(formatter, "could not download installer: {source}")
-            }
-            Self::InstallerDownloadStatus { status, body } if body.is_empty() => {
-                write!(formatter, "installer download returned HTTP {status}")
-            }
-            Self::InstallerDownloadStatus { status, body } => {
+            Self::MissingReleaseAsset { version, target } => {
                 write!(
                     formatter,
-                    "installer download returned HTTP {status}: {body}"
+                    "release {version} does not include a {target} update archive"
                 )
             }
-            Self::ReadInstaller(source) => write!(formatter, "could not read installer: {source}"),
-            Self::RunInstaller(source) => write!(formatter, "could not run installer: {source}"),
-            Self::InstallerStdin => formatter.write_str("could not open installer input"),
-            Self::WriteInstaller(source) => {
-                write!(formatter, "could not write installer: {source}")
+            Self::CreateTempDir(source) => {
+                write!(
+                    formatter,
+                    "could not create update work directory: {source}"
+                )
             }
-            Self::InstallerFailed { status } => write!(formatter, "installer failed with {status}"),
+            Self::DownloadReleaseAsset(source) => {
+                write!(formatter, "could not download release asset: {source}")
+            }
+            Self::ReleaseAssetStatus { status, body } if body.is_empty() => {
+                write!(formatter, "release asset download returned HTTP {status}")
+            }
+            Self::ReleaseAssetStatus { status, body } => {
+                write!(
+                    formatter,
+                    "release asset download returned HTTP {status}: {body}"
+                )
+            }
+            Self::ReadReleaseAsset(source) => {
+                write!(formatter, "could not read release asset: {source}")
+            }
+            Self::DecodeReleaseAsset(source) => {
+                write!(formatter, "release asset was not valid UTF-8: {source}")
+            }
+            Self::InvalidChecksum { message } => write!(formatter, "invalid checksum: {message}"),
+            Self::ChecksumMismatch { expected, actual } => write!(
+                formatter,
+                "release archive checksum mismatch: expected {expected}, got {actual}"
+            ),
+            Self::WriteUpdateFile(source) => {
+                write!(formatter, "could not write update file: {source}")
+            }
+            Self::ReadUpdateFile(source) => {
+                write!(formatter, "could not read update file: {source}")
+            }
+            Self::DecodeCommandOutput(source) => {
+                write!(formatter, "command output was not valid UTF-8: {source}")
+            }
+            Self::UnsafeArchiveEntry { entry } => {
+                write!(
+                    formatter,
+                    "release archive contained unsafe entry `{entry}`"
+                )
+            }
+            Self::MissingArchiveBinary { path } => {
+                write!(formatter, "release archive did not contain {path}")
+            }
+            Self::ArchiveBinaryNotRegular { path } => {
+                write!(
+                    formatter,
+                    "release archive binary was not a regular file: {path}"
+                )
+            }
+            Self::InstallDirectory(source) => {
+                write!(formatter, "could not create install directory: {source}")
+            }
+            Self::InstallBinary(source) => {
+                write!(formatter, "could not install release binary: {source}")
+            }
+            Self::InstallFailed { status } => write!(formatter, "install failed with {status}"),
+            Self::Command { operation, source } => {
+                write!(
+                    formatter,
+                    "could not run command while {operation}: {source}"
+                )
+            }
+            Self::CommandStatus { operation, status } => {
+                write!(formatter, "command failed with {status} while {operation}")
+            }
         }
     }
 }
@@ -424,20 +871,32 @@ impl Error for UpdateError {
             Self::Config(source) => Some(source),
             Self::CheckRequest(source)
             | Self::DecodeRelease(source)
-            | Self::DownloadInstaller(source)
-            | Self::ReadInstaller(source) => Some(source),
+            | Self::DownloadReleaseAsset(source)
+            | Self::ReadReleaseAsset(source) => Some(source),
             Self::Output(source)
             | Self::ReadCache(source)
             | Self::WriteCache(source)
             | Self::CurrentExecutable(source)
-            | Self::RunInstaller(source)
-            | Self::WriteInstaller(source) => Some(source),
+            | Self::CreateTempDir(source)
+            | Self::WriteUpdateFile(source)
+            | Self::ReadUpdateFile(source)
+            | Self::InstallDirectory(source)
+            | Self::InstallBinary(source) => Some(source),
             Self::DecodeCache(source) | Self::EncodeCache(source) => Some(source),
-            Self::CheckStatus { .. }
+            Self::DecodeReleaseAsset(source) | Self::DecodeCommandOutput(source) => Some(source),
+            Self::Command { source, .. } => Some(source),
+            Self::UnsupportedTarget { .. }
+            | Self::MissingReleaseAsset { .. }
+            | Self::CheckStatus { .. }
+            | Self::ReleaseAssetStatus { .. }
             | Self::MissingInstallDirectory
-            | Self::InstallerDownloadStatus { .. }
-            | Self::InstallerStdin
-            | Self::InstallerFailed { .. } => None,
+            | Self::InvalidChecksum { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::UnsafeArchiveEntry { .. }
+            | Self::MissingArchiveBinary { .. }
+            | Self::ArchiveBinaryNotRegular { .. }
+            | Self::InstallFailed { .. }
+            | Self::CommandStatus { .. } => None,
         }
     }
 }
@@ -456,7 +915,10 @@ impl From<io::Error> for UpdateError {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateCheck, compare_versions};
+    use super::{
+        LatestRelease, ReleaseAsset, UpdateCheck, clipped, compare_versions, parse_checksum,
+        select_release_package, verify_sha256,
+    };
 
     #[test]
     fn semantic_versions_compare_numerically() {
@@ -468,15 +930,67 @@ mod tests {
 
     #[test]
     fn update_check_builds_notice_only_for_newer_release() {
-        let newer = UpdateCheck::new("v0.1.1", "v0.1.2", None);
+        let newer = UpdateCheck::new("v0.1.1", "v0.1.2", None, None);
         assert!(newer.update_available());
         assert_eq!(
             newer.notice().unwrap().message(),
             "Update available: v0.1.2 - run 'meshh update'"
         );
 
-        let current = UpdateCheck::new("v0.1.1", "v0.1.1", None);
+        let current = UpdateCheck::new("v0.1.1", "v0.1.1", None, None);
         assert!(!current.update_available());
         assert!(current.notice().is_none());
+    }
+
+    #[test]
+    fn selects_current_target_release_package() {
+        let target = super::release_target().unwrap();
+        let version = "0.1.2";
+        let archive_name = format!("meshh_{version}_{}.tar.gz", target.triple);
+        let checksum_name = format!("{archive_name}.sha256");
+        let release = LatestRelease {
+            tag_name: format!("v{version}"),
+            html_url: Some("https://github.com/meshhai/meshh-tui/releases/tag/v0.1.2".to_owned()),
+            assets: vec![
+                ReleaseAsset {
+                    name: archive_name.clone(),
+                    browser_download_url: format!("https://example.test/{archive_name}"),
+                },
+                ReleaseAsset {
+                    name: checksum_name.clone(),
+                    browser_download_url: format!("https://example.test/{checksum_name}"),
+                },
+            ],
+        };
+
+        let package = select_release_package(&release).unwrap();
+
+        assert_eq!(package.archive_name, archive_name);
+        assert_eq!(package.checksum_name, checksum_name);
+        assert_eq!(
+            package.archive_dir,
+            format!("meshh_{version}_{}", target.triple)
+        );
+    }
+
+    #[test]
+    fn parses_and_verifies_release_checksum() {
+        let archive_name = "meshh_0.1.2_aarch64-apple-darwin.tar.gz";
+        let bytes = b"release archive";
+        let checksum = format!("{}  {archive_name}\n", super::hex_sha256(bytes));
+
+        let expected_hash = parse_checksum(&checksum, archive_name).unwrap();
+
+        verify_sha256(bytes, &expected_hash).unwrap();
+        assert!(verify_sha256(b"tampered", &expected_hash).is_err());
+    }
+
+    #[test]
+    fn clipped_truncates_on_character_boundaries() {
+        let value = "é".repeat(501);
+        let clipped = clipped(&value);
+
+        assert_eq!(clipped.chars().count(), 503);
+        assert!(clipped.ends_with("..."));
     }
 }
