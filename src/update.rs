@@ -1116,7 +1116,7 @@ mod tests {
     #[test]
     fn cached_update_check_preserves_installable_notice_state() {
         let cached = super::cached_update_check(super::CachedUpdateCheck {
-            latest_version: "v0.1.2".to_owned(),
+            latest_version: "v0.1.3".to_owned(),
             html_url: None,
             installable: true,
         });

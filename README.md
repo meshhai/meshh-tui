@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/meshhai/meshh-tui/master/scripts/in
 
 The installer downloads the matching GitHub Release archive, verifies its
 `.sha256` checksum, and installs the `meshh` binary. Set `MESHH_INSTALL_DIR` to
-choose the install directory, or `MESHH_VERSION=v0.1.1` to install a specific
+choose the install directory, or `MESHH_VERSION=v0.1.2` to install a specific
 release.
 
 Check for or install a newer release from an existing install:
@@ -28,14 +28,14 @@ Install from source with Cargo:
 cargo install --git https://github.com/meshhai/meshh-tui --bin meshh
 ```
 
-Or download a release archive from GitHub Releases. Replace `0.1.1` with the
+Or download a release archive from GitHub Releases. Replace `0.1.2` with the
 version you want to install:
 
 ```sh
 # macOS arm64 example
-curl -L https://github.com/meshhai/meshh-tui/releases/download/v0.1.1/meshh_0.1.1_aarch64-apple-darwin.tar.gz -o meshh.tar.gz
+curl -L https://github.com/meshhai/meshh-tui/releases/download/v0.1.2/meshh_0.1.2_aarch64-apple-darwin.tar.gz -o meshh.tar.gz
 tar -xzf meshh.tar.gz
-install -m 0755 meshh_0.1.1_aarch64-apple-darwin/meshh /usr/local/bin/meshh
+install -m 0755 meshh_0.1.2_aarch64-apple-darwin/meshh /usr/local/bin/meshh
 ```
 
 For local development builds:
@@ -48,20 +48,21 @@ meshh --help
 Release archives are named by version and target triple:
 
 ```text
-meshh_0.1.1_aarch64-apple-darwin.tar.gz
-meshh_0.1.1_x86_64-apple-darwin.tar.gz
-meshh_0.1.1_x86_64-unknown-linux-gnu.tar.gz
-meshh_0.1.1_x86_64-pc-windows-msvc.zip
+meshh_0.1.2_aarch64-apple-darwin.tar.gz
+meshh_0.1.2_x86_64-apple-darwin.tar.gz
+meshh_0.1.2_x86_64-unknown-linux-gnu.tar.gz
+meshh_0.1.2_x86_64-pc-windows-msvc.zip
 ```
 
 Each archive is published with a matching `.sha256` checksum file.
 
 ## Commands
 
-The first release is planned around two commands:
+The terminal client supports three commands:
 
 - `meshh login` authenticates the terminal with MESHH.
 - `meshh tui` opens the route delivery terminal UI.
+- `meshh update` checks for and installs newer compatible releases.
 
 `meshh login` starts MESHH device authorization, prints the browser verification URL and user code, polls for approval, and stores the returned destination-scoped bearer token. The token is not printed.
 
@@ -80,7 +81,7 @@ Waiting for approval...
 Login approved. Token stored.
 
 $ meshh tui
-meshh-tui v0.1.1 | live | 3 rows | row 1/3
+meshh-tui v0.1.2 | live | 3 rows | row 1/3
 +------------------------------------------------------------------------------+
 |Published    Source             Headline                              Status    |
 |> Jun 04 19:09 FED            FOMC statement shifts risk balance    delivered |
