@@ -29,6 +29,7 @@ use crate::{
     },
     config::RuntimeConfig,
     credentials::{BearerToken, CredentialError, CredentialStore, FileCredentialStore},
+    update::{self, UpdateNotice},
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -66,9 +67,11 @@ where
         .map_err(|source| TuiError::Terminal { source })?;
     let mut state = AppState::default();
     let (load_sender, load_events) = mpsc::channel();
+    let (update_sender, update_events) = mpsc::channel();
     let mut stream_events = None;
 
     draw_state(&mut terminal, &state)?;
+    spawn_update_check(update_sender);
     spawn_delivery_page_load(
         api.clone(),
         token.clone(),
@@ -82,8 +85,11 @@ where
         api,
         token,
         &load_sender,
-        &load_events,
-        &mut stream_events,
+        EventReceivers {
+            load: &load_events,
+            update: &update_events,
+            stream: &mut stream_events,
+        },
     )
     .await
 }
@@ -94,17 +100,17 @@ async fn run_event_loop<B, A>(
     api: &A,
     token: &BearerToken,
     load_sender: &mpsc::Sender<LoadWorkerMessage>,
-    load_events: &mpsc::Receiver<LoadWorkerMessage>,
-    stream_events: &mut Option<mpsc::Receiver<StreamWorkerMessage>>,
+    events: EventReceivers<'_>,
 ) -> Result<(), TuiError>
 where
     B: Backend<Error = io::Error>,
     A: DeliveryApi + Clone + Send + Sync + 'static,
 {
     loop {
-        drain_load_events(state, load_events);
-        drain_stream_events(state, stream_events);
-        ensure_stream_started(state, api, token, stream_events);
+        drain_load_events(state, events.load);
+        drain_update_events(state, events.update);
+        drain_stream_events(state, events.stream);
+        ensure_stream_started(state, api, token, events.stream);
         draw_state(terminal, state)?;
 
         if !event::poll(EVENT_POLL_INTERVAL).map_err(|source| TuiError::Terminal { source })? {
@@ -164,6 +170,25 @@ enum LoadWorkerMessage {
 enum StreamWorkerMessage {
     Frames(Vec<DeliveryStreamFrame>),
     Error(ApiError),
+}
+
+#[derive(Debug)]
+enum UpdateWorkerMessage {
+    Notice(Option<UpdateNotice>),
+}
+
+struct EventReceivers<'a> {
+    load: &'a mpsc::Receiver<LoadWorkerMessage>,
+    update: &'a mpsc::Receiver<UpdateWorkerMessage>,
+    stream: &'a mut Option<mpsc::Receiver<StreamWorkerMessage>>,
+}
+
+fn spawn_update_check(sender: mpsc::Sender<UpdateWorkerMessage>) {
+    tokio::spawn(async move {
+        if let Ok(notice) = update::check_for_update_with_cache().await {
+            let _ = sender.send(UpdateWorkerMessage::Notice(notice));
+        }
+    });
 }
 
 fn spawn_delivery_page_load<A>(
@@ -315,6 +340,14 @@ fn drain_load_events(state: &mut AppState, load_events: &mpsc::Receiver<LoadWork
     }
 }
 
+fn drain_update_events(state: &mut AppState, update_events: &mpsc::Receiver<UpdateWorkerMessage>) {
+    while let Ok(message) = update_events.try_recv() {
+        match message {
+            UpdateWorkerMessage::Notice(notice) => state.receive_update_notice(notice),
+        }
+    }
+}
+
 fn drain_stream_events(
     state: &mut AppState,
     stream_events: &Option<mpsc::Receiver<StreamWorkerMessage>>,
@@ -441,6 +474,7 @@ mod tests {
         DeliveryStreamFrame, MatchedRoute, PublicDeliveryId, StreamCursor, TransportError,
     };
     use crate::credentials::BearerToken;
+    use crate::update::UpdateNotice;
     use ratatui::{Terminal, backend::TestBackend};
     use std::time::Duration;
 
@@ -939,6 +973,28 @@ mod tests {
         assert!(detail_text.contains("https://alerts.example/del_pub_01"));
         assert!(detail_text.contains("Ops Escalation"));
         assert!(detail_text.contains(&format!("Published: {expected_timestamp}")));
+    }
+
+    #[test]
+    fn render_outputs_update_notice_when_available() {
+        let mut state = AppState::default();
+        apply_page(
+            &mut state,
+            DeliveryListPage::new(
+                vec![delivery(
+                    "del_pub_01",
+                    "CPU alert routed to ops",
+                    Some("Datadog"),
+                )],
+                None,
+            ),
+        );
+        state.receive_update_notice(Some(UpdateNotice::new("v0.1.2")));
+
+        let rendered = render_text(&state);
+
+        assert!(rendered.contains("Update available: v0.1.2 - run 'meshh update'"));
+        assert!(rendered.contains("CPU alert routed to ops"));
     }
 
     #[test]

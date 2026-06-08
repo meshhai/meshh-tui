@@ -6,3 +6,4 @@ pub mod config;
 pub mod credentials;
 pub mod login;
 pub mod tui;
+pub mod update;
