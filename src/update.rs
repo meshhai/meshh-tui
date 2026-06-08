@@ -102,6 +102,11 @@ impl UpdateCheck {
         self.update_available
     }
 
+    /// Returns whether a newer release can be installed on this platform.
+    pub fn installable_update_available(&self) -> bool {
+        self.update_available && self.package.is_some()
+    }
+
     /// Returns the release package for the current platform, when the release publishes one.
     fn package(&self) -> Option<&ReleasePackage> {
         self.package.as_ref()
@@ -109,7 +114,7 @@ impl UpdateCheck {
 
     /// Converts an available update into a TUI notice.
     pub fn notice(&self) -> Option<UpdateNotice> {
-        self.update_available
+        self.installable_update_available()
             .then(|| UpdateNotice::new(self.latest_version.clone()))
     }
 }
@@ -148,6 +153,12 @@ pub fn write_check_report(output: &mut impl Write, check: &UpdateCheck) -> Resul
         writeln!(output, "Update available.")?;
         if let Some(html_url) = check.html_url() {
             writeln!(output, "Release: {html_url}")?;
+        }
+        if let Some(package) = check.package() {
+            writeln!(output, "Archive: {}", package.archive_url)?;
+            writeln!(output, "Checksum: {}", package.checksum_url)?;
+        } else {
+            writeln!(output, "No update archive is available for this platform.")?;
         }
     } else {
         writeln!(output)?;
@@ -636,37 +647,115 @@ fn version_is_newer(candidate: &str, current: &str) -> bool {
 fn compare_versions(left: &str, right: &str) -> Ordering {
     let left_raw = left;
     let right_raw = right;
-    let Some(left) = version_components(left_raw) else {
+    let Some(left) = ParsedVersion::parse(left_raw) else {
         return left_raw.cmp(right_raw);
     };
-    let Some(right) = version_components(right_raw) else {
+    let Some(right) = ParsedVersion::parse(right_raw) else {
         return left_raw.cmp(right_raw);
     };
+
+    left.cmp(&right)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedVersion {
+    components: Vec<u64>,
+    prerelease: Option<Vec<String>>,
+}
+
+impl ParsedVersion {
+    fn parse(version: &str) -> Option<Self> {
+        let version = version.trim().trim_start_matches('v');
+        let core_and_pre = version
+            .split_once('+')
+            .map_or(version, |(left, _build)| left);
+        let (core, prerelease) = core_and_pre
+            .split_once('-')
+            .map_or((core_and_pre, None), |(core, prerelease)| {
+                (core, Some(prerelease))
+            });
+        let components = core
+            .split('.')
+            .map(str::parse)
+            .collect::<Result<Vec<u64>, _>>()
+            .ok()?;
+
+        if components.is_empty() {
+            return None;
+        }
+
+        let prerelease = prerelease.map(|prerelease| {
+            prerelease
+                .split('.')
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        });
+
+        Some(Self {
+            components,
+            prerelease,
+        })
+    }
+}
+
+impl Ord for ParsedVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let len = self.components.len().max(other.components.len());
+
+        for index in 0..len {
+            let left = self.components.get(index).copied().unwrap_or(0);
+            let right = other.components.get(index).copied().unwrap_or(0);
+
+            match left.cmp(&right) {
+                Ordering::Equal => {}
+                ordering => return ordering,
+            }
+        }
+
+        compare_prerelease(&self.prerelease, &other.prerelease)
+    }
+}
+
+impl PartialOrd for ParsedVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn compare_prerelease(left: &Option<Vec<String>>, right: &Option<Vec<String>>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => compare_prerelease_identifiers(left, right),
+    }
+}
+
+fn compare_prerelease_identifiers(left: &[String], right: &[String]) -> Ordering {
     let len = left.len().max(right.len());
 
     for index in 0..len {
-        let left = left.get(index).copied().unwrap_or(0);
-        let right = right.get(index).copied().unwrap_or(0);
-
-        match left.cmp(&right) {
-            Ordering::Equal => {}
-            ordering => return ordering,
+        match (left.get(index), right.get(index)) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) => match compare_prerelease_identifier(left, right) {
+                Ordering::Equal => {}
+                ordering => return ordering,
+            },
         }
     }
 
     Ordering::Equal
 }
 
-fn version_components(version: &str) -> Option<Vec<u64>> {
-    let version = version.trim().trim_start_matches('v');
-    let core = version.split_once('-').map_or(version, |(core, _)| core);
-    let components = core
-        .split('.')
-        .map(str::parse)
-        .collect::<Result<Vec<u64>, _>>()
-        .ok()?;
-
-    (!components.is_empty()).then_some(components)
+fn compare_prerelease_identifier(left: &str, right: &str) -> Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
 }
 
 fn clipped(value: &str) -> String {
@@ -968,19 +1057,29 @@ mod tests {
         assert!(compare_versions("v0.2.0", "v0.1.99").is_gt());
         assert!(compare_versions("v0.1.1", "v0.1.1").is_eq());
         assert!(compare_versions("v0.1", "v0.1.0").is_eq());
+        assert!(compare_versions("v0.2.0", "v0.2.0-rc.1").is_gt());
+        assert!(compare_versions("v0.2.0-rc.2", "v0.2.0-rc.1").is_gt());
+        assert!(compare_versions("v0.2.0-rc.1", "v0.2.0").is_lt());
     }
 
     #[test]
-    fn update_check_builds_notice_only_for_newer_release() {
-        let newer = UpdateCheck::new("v0.1.1", "v0.1.2", None, None);
+    fn update_check_builds_notice_only_for_installable_newer_release() {
+        let newer = UpdateCheck::new("v0.1.1", "v0.1.2", None, Some(package()));
         assert!(newer.update_available());
+        assert!(newer.installable_update_available());
         assert_eq!(
             newer.notice().unwrap().message(),
             "Update available: v0.1.2 - run 'meshh update'"
         );
 
+        let unavailable = UpdateCheck::new("v0.1.1", "v0.1.2", None, None);
+        assert!(unavailable.update_available());
+        assert!(!unavailable.installable_update_available());
+        assert!(unavailable.notice().is_none());
+
         let current = UpdateCheck::new("v0.1.1", "v0.1.1", None, None);
         assert!(!current.update_available());
+        assert!(!current.installable_update_available());
         assert!(current.notice().is_none());
     }
 
@@ -1049,5 +1148,15 @@ mod tests {
             & 0o777;
 
         assert_eq!(mode, 0o700);
+    }
+
+    fn package() -> super::ReleasePackage {
+        super::ReleasePackage {
+            archive_name: "meshh_0.1.2_aarch64-apple-darwin.tar.gz".to_owned(),
+            archive_url: "https://example.test/archive.tar.gz".to_owned(),
+            checksum_name: "meshh_0.1.2_aarch64-apple-darwin.tar.gz.sha256".to_owned(),
+            checksum_url: "https://example.test/archive.tar.gz.sha256".to_owned(),
+            archive_dir: "meshh_0.1.2_aarch64-apple-darwin".to_owned(),
+        }
     }
 }

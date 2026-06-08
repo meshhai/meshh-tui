@@ -69,7 +69,7 @@ async fn run_update_command(check_only: bool, yes: bool) -> Result<()> {
 
     update::write_check_report(&mut output, &check)?;
 
-    if check_only || !check.update_available() {
+    if check_only || !check.installable_update_available() {
         return Ok(());
     }
 
