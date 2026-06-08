@@ -15,6 +15,13 @@ The installer downloads the matching GitHub Release archive, verifies its
 choose the install directory, or `MESHH_VERSION=v0.1.1` to install a specific
 release.
 
+Check for or install a newer release from an existing install:
+
+```sh
+meshh update --check
+meshh update
+```
+
 Install from source with Cargo:
 
 ```sh

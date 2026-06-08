@@ -15,23 +15,42 @@ use super::{
 
 /// Renders the TUI from immutable app state.
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let show_update_notice = state.update_notice().is_some();
+    let constraints = if show_update_notice {
+        vec![
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(2),
-        ])
+        ]
+    } else {
+        vec![
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ]
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(frame.area());
 
     render_header(frame, layout[0], state);
 
+    let content_area_index = if show_update_notice {
+        render_update_notice(frame, layout[1], state);
+        2
+    } else {
+        1
+    };
+    let footer_area_index = content_area_index + 1;
+
     match state.screen() {
-        Screen::DeliveryList => render_list(frame, layout[1], state),
-        Screen::DeliveryDetail { .. } => render_detail(frame, layout[1], state),
+        Screen::DeliveryList => render_list(frame, layout[content_area_index], state),
+        Screen::DeliveryDetail { .. } => render_detail(frame, layout[content_area_index], state),
     }
 
-    render_footer(frame, layout[2], state);
+    render_footer(frame, layout[footer_area_index], state);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
@@ -59,6 +78,20 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
         Span::raw(" | "),
         Span::raw(selected),
     ]);
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_update_notice(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
+    let Some(notice) = state.update_notice() else {
+        return;
+    };
+    let line = Line::from(Span::styled(
+        notice.message(),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
 
     frame.render_widget(Paragraph::new(line), area);
 }

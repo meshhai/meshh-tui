@@ -2,6 +2,7 @@ use crate::api::{
     ApiError, DeliveryDetail, DeliveryListItem, DeliveryListPage, DeliveryStreamFrame,
     PublicDeliveryId, StreamCursor,
 };
+use crate::update::UpdateNotice;
 
 use super::stream_session::DeliveryStreamSession;
 
@@ -133,6 +134,7 @@ pub struct AppState {
     stream_session: DeliveryStreamSession,
     detail_status: DetailStatus,
     detail: Option<DeliveryDetail>,
+    update_notice: Option<UpdateNotice>,
     pub(super) list_request_generation: u64,
     pub(super) detail_request_generation: u64,
 }
@@ -149,6 +151,7 @@ impl Default for AppState {
             stream_session: DeliveryStreamSession::default(),
             detail_status: DetailStatus::Hidden,
             detail: None,
+            update_notice: None,
             list_request_generation: 0,
             detail_request_generation: 0,
         }
@@ -205,6 +208,16 @@ impl AppState {
     /// Returns the loaded detail record.
     pub fn detail(&self) -> Option<&DeliveryDetail> {
         self.detail.as_ref()
+    }
+
+    /// Returns the available update notice, when one has been discovered.
+    pub fn update_notice(&self) -> Option<&UpdateNotice> {
+        self.update_notice.as_ref()
+    }
+
+    /// Applies the latest update notice from the background checker.
+    pub fn receive_update_notice(&mut self, notice: Option<UpdateNotice>) {
+        self.update_notice = notice;
     }
 
     /// Moves the delivery list into a loading state.
