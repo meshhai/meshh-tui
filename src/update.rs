@@ -379,8 +379,19 @@ fn validate_archive(archive_path: &Path, expected_dir: &str) -> Result<(), Updat
     }
 
     let binary_entry = format!("{expected_dir}/{BINARY_NAME}");
-    if !entries.lines().any(|entry| entry == binary_entry) {
-        return Err(UpdateError::MissingArchiveBinary { path: binary_entry });
+    let binary_entry_count = entries
+        .lines()
+        .filter(|entry| *entry == binary_entry)
+        .count();
+
+    match binary_entry_count {
+        0 => {
+            return Err(UpdateError::MissingArchiveBinary { path: binary_entry });
+        }
+        1 => {}
+        _ => {
+            return Err(UpdateError::DuplicateArchiveBinary { path: binary_entry });
+        }
     }
 
     let verbose_output = run_command_capture(
@@ -389,12 +400,21 @@ fn validate_archive(archive_path: &Path, expected_dir: &str) -> Result<(), Updat
     )?;
     let verbose = String::from_utf8(verbose_output).map_err(UpdateError::DecodeCommandOutput)?;
 
-    if !verbose.lines().any(|line| {
-        line.starts_with('-')
-            && line
-                .strip_suffix(&format!(" {expected_dir}/{BINARY_NAME}"))
+    let binary_verbose_entries = verbose
+        .lines()
+        .filter(|line| {
+            line.strip_suffix(&format!(" {expected_dir}/{BINARY_NAME}"))
                 .is_some()
-    }) {
+        })
+        .collect::<Vec<_>>();
+
+    if binary_verbose_entries.len() != 1 {
+        return Err(UpdateError::DuplicateArchiveBinary {
+            path: format!("{expected_dir}/{BINARY_NAME}"),
+        });
+    }
+
+    if !binary_verbose_entries[0].starts_with('-') {
         return Err(UpdateError::ArchiveBinaryNotRegular {
             path: format!("{expected_dir}/{BINARY_NAME}"),
         });
@@ -430,9 +450,9 @@ fn extract_archive_binary(
     )?;
 
     let binary_path = output_dir.join(binary_entry);
-    let metadata = fs::metadata(&binary_path).map_err(UpdateError::ReadUpdateFile)?;
+    let metadata = fs::symlink_metadata(&binary_path).map_err(UpdateError::ReadUpdateFile)?;
 
-    if !metadata.is_file() {
+    if !metadata.file_type().is_file() {
         return Err(UpdateError::ArchiveBinaryNotRegular {
             path: binary_path.display().to_string(),
         });
@@ -528,7 +548,7 @@ impl TempDir {
                 .as_nanos();
             let path = base.join(format!("{prefix}-{unique}-{attempt}"));
 
-            match fs::create_dir(&path) {
+            match create_private_dir(&path) {
                 Ok(()) => return Ok(Self { path }),
                 Err(source) if source.kind() == ErrorKind::AlreadyExists => {}
                 Err(source) => return Err(UpdateError::CreateTempDir(source)),
@@ -544,6 +564,18 @@ impl TempDir {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
 }
 
 impl Drop for TempDir {
@@ -731,6 +763,9 @@ pub enum UpdateError {
     MissingArchiveBinary {
         path: String,
     },
+    DuplicateArchiveBinary {
+        path: String,
+    },
     ArchiveBinaryNotRegular {
         path: String,
     },
@@ -839,6 +874,12 @@ impl fmt::Display for UpdateError {
             Self::MissingArchiveBinary { path } => {
                 write!(formatter, "release archive did not contain {path}")
             }
+            Self::DuplicateArchiveBinary { path } => {
+                write!(
+                    formatter,
+                    "release archive contained duplicate {path} entries"
+                )
+            }
             Self::ArchiveBinaryNotRegular { path } => {
                 write!(
                     formatter,
@@ -894,6 +935,7 @@ impl Error for UpdateError {
             | Self::ChecksumMismatch { .. }
             | Self::UnsafeArchiveEntry { .. }
             | Self::MissingArchiveBinary { .. }
+            | Self::DuplicateArchiveBinary { .. }
             | Self::ArchiveBinaryNotRegular { .. }
             | Self::InstallFailed { .. }
             | Self::CommandStatus { .. } => None,
@@ -992,5 +1034,20 @@ mod tests {
 
         assert_eq!(clipped.chars().count(), 503);
         assert!(clipped.ends_with("..."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_update_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = super::TempDir::create("meshh-update-test").unwrap();
+        let mode = std::fs::metadata(temp_dir.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o700);
     }
 }
