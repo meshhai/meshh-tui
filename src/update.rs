@@ -53,6 +53,7 @@ pub struct UpdateCheck {
     latest_version: String,
     html_url: Option<String>,
     package: Option<ReleasePackage>,
+    installable: bool,
     update_available: bool,
 }
 
@@ -66,12 +67,34 @@ impl UpdateCheck {
         let current_version = current_version.into();
         let latest_version = latest_version.into();
         let update_available = version_is_newer(&latest_version, &current_version);
+        let installable = package.is_some();
 
         Self {
             current_version,
             latest_version,
             html_url,
             package,
+            installable,
+            update_available,
+        }
+    }
+
+    fn cached(
+        current_version: impl Into<String>,
+        latest_version: impl Into<String>,
+        html_url: Option<String>,
+        installable: bool,
+    ) -> Self {
+        let current_version = current_version.into();
+        let latest_version = latest_version.into();
+        let update_available = version_is_newer(&latest_version, &current_version);
+
+        Self {
+            current_version,
+            latest_version,
+            html_url,
+            package: None,
+            installable,
             update_available,
         }
     }
@@ -104,7 +127,7 @@ impl UpdateCheck {
 
     /// Returns whether a newer release can be installed on this platform.
     pub fn installable_update_available(&self) -> bool {
-        self.update_available && self.package.is_some()
+        self.update_available && self.installable
     }
 
     /// Returns the release package for the current platform, when the release publishes one.
@@ -618,12 +641,16 @@ fn read_fresh_cached_check(path: &PathBuf) -> Result<Option<UpdateCheck>, Update
     let cache: CachedUpdateCheck =
         serde_json::from_str(&contents).map_err(UpdateError::DecodeCache)?;
 
-    Ok(Some(UpdateCheck::new(
+    Ok(Some(cached_update_check(cache)))
+}
+
+fn cached_update_check(cache: CachedUpdateCheck) -> UpdateCheck {
+    UpdateCheck::cached(
         current_version_tag(),
         cache.latest_version,
         cache.html_url,
-        None,
-    )))
+        cache.installable,
+    )
 }
 
 fn write_cached_check(path: &PathBuf, check: &UpdateCheck) -> Result<(), UpdateError> {
@@ -634,6 +661,7 @@ fn write_cached_check(path: &PathBuf, check: &UpdateCheck) -> Result<(), UpdateE
     let cache = CachedUpdateCheck {
         latest_version: check.latest_version.clone(),
         html_url: check.html_url.clone(),
+        installable: check.installable,
     };
     let contents = serde_json::to_string(&cache).map_err(UpdateError::EncodeCache)?;
 
@@ -801,6 +829,8 @@ struct ReleaseTarget {
 struct CachedUpdateCheck {
     latest_version: String,
     html_url: Option<String>,
+    #[serde(default)]
+    installable: bool,
 }
 
 /// Errors produced while checking for or installing updates.
@@ -1081,6 +1111,19 @@ mod tests {
         assert!(!current.update_available());
         assert!(!current.installable_update_available());
         assert!(current.notice().is_none());
+    }
+
+    #[test]
+    fn cached_update_check_preserves_installable_notice_state() {
+        let cached = super::cached_update_check(super::CachedUpdateCheck {
+            latest_version: "v0.1.2".to_owned(),
+            html_url: None,
+            installable: true,
+        });
+
+        assert!(cached.update_available());
+        assert!(cached.installable_update_available());
+        assert!(cached.notice().is_some());
     }
 
     #[test]
